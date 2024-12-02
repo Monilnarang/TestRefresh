@@ -31,7 +31,7 @@ enum StatementType {
 public class SlicingUtils {
     private HashMap<String, ArrayList<String>> variableMap = new HashMap<String, ArrayList<String>>(); // key: variable name, value: variable type & variable value
 
-    public static void addValue(TreeMap<Integer, ArrayList<String>> map, Integer key, String value) {
+    public static void addValue(TreeMap<Integer, ArrayList<LiteralStringValueExpr>> map, Integer key, LiteralStringValueExpr value) {
         // Check if the key exists
         if (!map.containsKey(key)) {
             // If the key does not exist, create a new ArrayList
@@ -41,12 +41,12 @@ public class SlicingUtils {
         map.get(key).add(value);
     }
 
-    public static ArrayList<TrieLikeNode> createTrieFromStatementsWrapper(NodeList<Node> Statements, TreeMap<Integer, ArrayList<String>> valueSets) {
+    public static ArrayList<TrieLikeNode> createTrieFromStatementsWrapper(NodeList<Node> Statements, TreeMap<Integer, ArrayList<LiteralStringValueExpr>> valueSets) {
         HashMap<String, Integer> hardcodedMap = new HashMap<>();
         return createTrieFromStatements(Statements, hardcodedMap, valueSets);
     }
 
-    public static ArrayList<TrieLikeNode> createTrieFromStatementsNew(NodeList<Node> Statements, HashMap<String, Integer> hardcodedMap, TreeMap<Integer, ArrayList<String>> valueSets) {
+    public static ArrayList<TrieLikeNode> createTrieFromStatementsNew(NodeList<Node> Statements, HashMap<String, Integer> hardcodedMap, TreeMap<Integer, ArrayList<LiteralStringValueExpr>> valueSets) {
         ArrayList<TrieLikeNode> trieLikeNodes = new ArrayList<TrieLikeNode>();
 
         for (Node stmt : Statements) {
@@ -74,7 +74,20 @@ public class SlicingUtils {
                     stmtNode.type = StatementType.EXPRESSION_STMT;
                     stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
                 }
-            } else if (stmt instanceof MethodCallExpr) {
+            }
+            else if (stmt instanceof FieldAccessExpr) {
+                FieldAccessExpr fieldAccessExpr = ((FieldAccessExpr) stmt).clone();  // Clone the field access expression
+                if (fieldAccessExpr.getChildNodes().size() > 0) {
+                    NodeList<Node> childNodes = new NodeList<>();
+                    int fieldAccessExprSize = fieldAccessExpr.getChildNodes().size();
+                    for (int i = 0; i < fieldAccessExprSize; i++) {
+                        childNodes.add(fieldAccessExpr.getChildNodes().get(i).clone());  // Clone each child node
+                    }
+                    stmtNode.type = StatementType.EXPRESSION_STMT;
+                    stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
+                }
+            }
+            else if (stmt instanceof MethodCallExpr) {
                 MethodCallExpr methodCallExpr = ((MethodCallExpr) stmt).clone();  // Clone the method call expression
                 int methodCallExprSize = methodCallExpr.getChildNodes().size();
                 if (methodCallExprSize > 0) {
@@ -159,7 +172,7 @@ public class SlicingUtils {
                 LiteralStringValueExpr literalExpr = ((LiteralStringValueExpr) stmt).clone();  // Clone the literal expression
                 if (!hardcodedMap.containsKey(literalExpr.getValue())) {
                     hardcodedMap.put(literalExpr.getValue(), hardcodedMap.size() + 1);
-                    addValue(valueSets, hardcodedMap.size(), literalExpr.getValue());
+                    addValue(valueSets, hardcodedMap.size(), literalExpr);
                 }
                 stmtNode.value = literalExpr.getValue();
                 stmtNode.type = StatementType.LITERAL;
@@ -173,7 +186,7 @@ public class SlicingUtils {
         }
         return trieLikeNodes;
     }
-    public static ArrayList<TrieLikeNode> createTrieFromStatements(NodeList<Node> Statements, HashMap<String, Integer> hardcodedMap, TreeMap<Integer, ArrayList<String>> valueSets) { // one array per test
+    public static ArrayList<TrieLikeNode> createTrieFromStatements(NodeList<Node> Statements, HashMap<String, Integer> hardcodedMap, TreeMap<Integer, ArrayList<LiteralStringValueExpr>> valueSets) { // one array per test
         ArrayList<TrieLikeNode> trieLikeNodes = new ArrayList<TrieLikeNode>();
         for (Node stmt : Statements) {
             TrieLikeNode stmtNode = new TrieLikeNode();
@@ -305,7 +318,7 @@ public class SlicingUtils {
                 LiteralStringValueExpr literalExpr = ((LiteralStringValueExpr) stmt).clone();
                 if(!hardcodedMap.containsKey(literalExpr.getValue())) {
                     hardcodedMap.put(literalExpr.getValue(), hardcodedMap.size() + 1);
-                    addValue(valueSets, hardcodedMap.size(), literalExpr.getValue());
+                    addValue(valueSets, hardcodedMap.size(), literalExpr);
                 }
                 stmtNode.value = literalExpr.getValue();
                 stmtNode.type = StatementType.LITERAL;
@@ -313,6 +326,18 @@ public class SlicingUtils {
             } // save current value
             else if (stmt instanceof PrimitiveType) {
                 stmtNode.type =  StatementType.PRIMITIVE;
+            }
+            else if (stmt instanceof FieldAccessExpr) {
+                FieldAccessExpr fieldAccessExpr = ((FieldAccessExpr) stmt).clone();  // Clone the field access expression
+                if (fieldAccessExpr.getChildNodes().size() > 0) {
+                    NodeList<Node> childNodes = new NodeList<>();
+                    int fieldAccessExprSize = fieldAccessExpr.getChildNodes().size();
+                    for (int i = 0; i < fieldAccessExprSize; i++) {
+                        childNodes.add(fieldAccessExpr.getChildNodes().get(i).clone());  // Clone each child node
+                    }
+                    stmtNode.type = StatementType.EXPRESSION_STMT;
+                    stmtNode.children = createTrieFromStatements(childNodes, hardcodedMap, valueSets);
+                }
             }
             else {
                 throw new IllegalStateException("Unexpected value: " + stmt);

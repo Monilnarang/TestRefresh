@@ -2,15 +2,19 @@ package refactor2refresh;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Node;
 import com.github.javaparser.ast.NodeList;
+import com.github.javaparser.ast.body.BodyDeclaration;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
-import com.github.javaparser.ast.comments.BlockComment;
 import com.github.javaparser.ast.expr.*;
-import com.github.javaparser.ast.nodeTypes.NodeWithName;
+import com.google.googlejavaformat.java.Formatter;
+import com.google.googlejavaformat.java.FormatterException;
+import com.github.javaparser.ast.stmt.ExpressionStmt;
 import com.github.javaparser.ast.stmt.Statement;
 import com.github.javaparser.symbolsolver.JavaSymbolSolver;
 import com.github.javaparser.symbolsolver.resolution.typesolvers.CombinedTypeSolver;
@@ -19,8 +23,6 @@ import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 
 import java.io.*;
-import java.nio.file.Files;
-import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -30,20 +32,23 @@ public class Refactor2Refresh {
     protected static final File DEFAULT_OUTPUT_DIR = new File("./z-out-retrofit/");
     private static File outputDir = DEFAULT_OUTPUT_DIR;
 
-    private static String GPT_PROMPT_VALUE_SETS = "Consider the below value sets of a parameterised unit test and the test itself written in Java.\\n\" +\n" +
-            "                \"Could you please help me add more value sets to this test method so as to increase the coverage, cover the edge cases, and reveal bugs in the source code.\\n\" +\n" +
-            "                \"Please try to generate minimum number of such value sets. And only output the updated java code.";
+    private static String GPT_PROMPT_VALUE_SETS = "For this prompt, only output java code and nothing else, comments in the code is fine. Consider the below value sets of a parameterised unit test and the test itself written in Java. "+
+            "                Could you please help me add more value sets to this test method so as to increase the coverage, cover the edge cases, and reveal bugs in the source code." +
+            "                Please try to generate minimum number of such value sets. " +
+            "                And only output the updated java code." +
+            "                Please keep each value set in a separate line.";
 
-    private static String GPT_PROMPT_ATOMIZED_TESTS = "A backward slice – simply a version of the original program with some parts missing – can be compiled and executed. An important property of any backward slice is that it preserves the effect of the original program on the variable chosen at the selected point of interest within the program.\n" +
+    private static String GPT_PROMPT_ATOMIZED_TESTS = "A backward slice is a version of the original program with only the parts that impact a specific variable at a specific point in the program. It removes any code that doesn’t affect that variable, yet it can still run and produce the same result for that variable as the original program.\n" +
             "\n" +
             "Consider the below Java test file. Could you please generate backward slices for every assertion present in the file. And reply with a new test file with atomised tests created from those slices. \n" +
             "\n" +
-            "More rules: Only reply with Java code and nothing else. To name the new atomic methods, use the current names and add _1, _2 .. suffix. Don't add any other new code or new text which was not present in the actual file. For any code which is commented keep it as it is in the new file" +
+            "More rules: " +
+            "Only reply with Java code and nothing else. " +
+            "To name the new atomic methods, use the current names and add _1, _2 .. suffix. " +
+            "Don't add any other new code or new text which was not present in the actual file. " +
+            "For any code which is commented keep it as it is in the new file." +
+            "Make sure to not include the lines which aren't being used in the atomized test." +
             "Here is the test file to do for: ";
-
-    protected static String getDisclaimer(CompilationUnit.Storage s) {
-        return String.format("\n\tThis file was automatically generated as part of a slice with criterion");
-    }
 
     static CompilationUnit configureJavaParserAndGetCompilationUnit(String filePath) throws FileNotFoundException {
         // Configure JavaParser
@@ -65,10 +70,10 @@ public class Refactor2Refresh {
         if (methodOpt.isPresent()) {
             MethodDeclaration method = methodOpt.get();
             statements = method.getBody().get().getStatements();
-            System.out.println("Method found:");
-            System.out.println(method);
+//            System.out.println("Method found:");
+//            System.out.println(method);
         } else {
-            System.out.println("Method 'test1' not found.");
+            System.out.println("Method "+ name +" not found in CU.");
         }
         NodeList<Node> statementsNodes = new NodeList<>();
         for (int i=0;i<statements.size();i++) {
@@ -79,7 +84,7 @@ public class Refactor2Refresh {
     }
 
     static boolean areTestsSimilarEnoughToBeRetrofitted(NodeList<Node> statementNodes1, NodeList<Node> statementNodes2) {
-        TreeMap<Integer, ArrayList<String>> paramWiseValueSets = new TreeMap<Integer, ArrayList<String>>();
+        TreeMap<Integer, ArrayList<LiteralStringValueExpr>> paramWiseValueSets = new TreeMap<Integer, ArrayList<LiteralStringValueExpr>>();
 
         HashMap<String, SlicingUtils.Variable> variableMap1 = new HashMap<String, SlicingUtils.Variable>();
         HashMap<String, SlicingUtils.Variable> variableMap2 = new HashMap<String, SlicingUtils.Variable>();
@@ -93,10 +98,10 @@ public class Refactor2Refresh {
         slicingUtils.populateVariableMapFromTrie(trie2, variableMap2);
         HashMap<String, String> crossVariableMap = new HashMap<String, String>();
         if(SlicingUtils.compareTrieLists(trie1, trie2, crossVariableMap)) {
-            System.out.println("Tests are similar enough to be retrofitted together");
+//            System.out.println("Tests are similar enough to be retrofitted together");
             return true;
         } else {
-            System.out.println("Tests can't be retrofitted together");
+//            System.out.println("Tests can't be retrofitted together");
             return false;
         }
     }
@@ -143,6 +148,7 @@ public class Refactor2Refresh {
 
     static List<List<UnitTest>> groupSimilarTests(List<String> listTestMethods, HashMap<String, NodeList<Node>> statementNodesListMap) {
         // For every test method, check if it can be retrofitted with any other test method
+        // If tests have a similar tree then doing this.
         List<List<UnitTest>> similarTestGroups = new ArrayList<>();
         HashSet<String> testsTaken = new HashSet<>();
         for (String testMethodName1 : listTestMethods) {
@@ -167,10 +173,26 @@ public class Refactor2Refresh {
         return similarTestGroups;
     }
 
+    private static Class<?> inferType(LiteralStringValueExpr expr) {
+        if (expr instanceof IntegerLiteralExpr) {
+            return int.class;
+        } else if (expr instanceof DoubleLiteralExpr) {
+            return double.class;
+        } else if (expr instanceof LongLiteralExpr) {
+            return long.class;
+        } else if (expr instanceof CharLiteralExpr) {
+            return char.class;
+        } else if (expr instanceof StringLiteralExpr) {
+            return String.class;
+        } else {
+            // Fallback for unsupported or custom literal types
+            throw new IllegalArgumentException("Unsupported literal type: " + expr.getClass().getSimpleName());
+        }
+    }
     static List<MethodDeclaration> retrofitSimilarTestsTogether(List<List<UnitTest>> similarTestGroups, CompilationUnit cu) {
         List<MethodDeclaration> newPUTsList = new ArrayList<>();
         for( List<UnitTest> group : similarTestGroups) {
-            TreeMap<Integer, ArrayList<String>> parameter_to_values_map = new TreeMap<Integer, ArrayList<String>>();
+            TreeMap<Integer, ArrayList<LiteralStringValueExpr>> parameter_to_values_map = new TreeMap<Integer, ArrayList<LiteralStringValueExpr>>();
             String firstTestName = group.get(0).Name;
             String newTestName = "parameterisedTest_";
             for( UnitTest unitTest : group) {
@@ -184,54 +206,47 @@ public class Refactor2Refresh {
                     .filter(m -> m.getNameAsString().equals(firstTestName))
                     .findFirst();
             if (methodOpt.isPresent()) {
-
                 MethodDeclaration method = methodOpt.get();
 
                 // add parameters : replace hardcoded and add in signature
                 for (int i = 0; i < parameter_to_values_map.size(); i++) {
-                    ArrayList<String> values = parameter_to_values_map.get(i + 1);  // TreeMap keys start from 1 in this example
+//                    ArrayList<String> values = parameter_to_values_map.get(i + 1);
+                    ArrayList<LiteralStringValueExpr> values = parameter_to_values_map.get(i + 1); // TreeMap keys start from 1 in this example
                     if (values != null && !values.isEmpty()) {
-                        // Initial value is the first element of the array
-                        String initialValue = values.get(0);
-                        // Construct parameter name
+//                        String initialValue = values.get(0);
+                        LiteralStringValueExpr initialValue = values.get(0);
                         String parameterName = "param" + (i + 1);
-                        // Print the initial value and parameter name
-//                    System.out.println("Initial value: " + initialValue + ", Parameter name: " + parameterName);
-                        method.addParameter(int.class, parameterName);
-                        // Traverse the method body to find and replace the hardcoded value
+                        Class<?> parameterType = inferType(initialValue);
+                        method.addParameter(parameterType, parameterName);
+//                        method.addParameter(int.class, parameterName);
                         method.findAll(LiteralStringValueExpr.class).forEach(literalExpr -> {
-                            if (literalExpr.getValue().equals(initialValue)) {
+                            if (literalExpr.getValue().equals(initialValue.getValue())) {
                                 literalExpr.replace(new NameExpr(parameterName));
                             }
                         });
                     }
                 }
-                // Remove the @Test annotation
                 method.getAnnotations().removeIf(annotation -> annotation.getNameAsString().equals("Test"));
-                // Add the @ParameterizedTest annotation
                 method.addAnnotation(new MarkerAnnotationExpr("ParameterizedTest"));
-                // change name of methods to "parameterisedTest"
                 method.setName(newTestName);
                 NormalAnnotationExpr csvSourceAnnotation = new NormalAnnotationExpr();
-                // Construct the CSV source values
+//                List<String> csvRows = IntStream.range(0, parameter_to_values_map.get(1).size())
+//                        .mapToObj(i -> parameter_to_values_map.values().stream()
+//                                .map(list -> list.get(i))
+//                                .collect(Collectors.joining(", ")))
+//                        .collect(Collectors.toList());
+
                 List<String> csvRows = IntStream.range(0, parameter_to_values_map.get(1).size())
                         .mapToObj(i -> parameter_to_values_map.values().stream()
-                                .map(list -> list.get(i))
+                                .map(list -> list.get(i).getValue()) // Extract the string value
                                 .collect(Collectors.joining(", ")))
                         .collect(Collectors.toList());
 
                 String csvSourceValues = csvRows.stream()
                         .collect(Collectors.joining("\", \"", "\"", "\""));
-
-                // Add the @CsvSource annotation
                 csvSourceAnnotation.setName("CsvSource");
                 csvSourceAnnotation.addPair("value", "{" + csvSourceValues + "}");
-
                 method.addAnnotation(csvSourceAnnotation);
-
-                // Print the modified method
-                System.out.println("Modified method:");
-                System.out.println(method);
                 newPUTsList.add(method.clone());
             }
         }
@@ -248,19 +263,96 @@ public class Refactor2Refresh {
                 .modelName("gpt-4o-mini")
                 .build();
 
-        // Create a new file with GPT-modified methods
-        try (BufferedWriter writerGPT = new BufferedWriter(new FileWriter(outputFilePathGPT))) {
-            for (MethodDeclaration method : newMethods) {
-                // Generate GPT-modified method
-                String answer = model.generate(GPT_PROMPT_VALUE_SETS + method);
-                System.out.println("Modified Method with GPT Generated Value Sets \n" + answer);
+        try {
+            // Parse the input file and set up the output CompilationUnit
+            CompilationUnit inputCompilationUnit = StaticJavaParser.parse(new File(inputFilePath));
+            CompilationUnit outputCompilationUnit = new CompilationUnit();
 
-                // Write each modified method to the GPT file
-                writerGPT.write(answer);
-                writerGPT.newLine();
-                writerGPT.newLine(); // Add space between methods
+            // Copy imports and package declarations
+            outputCompilationUnit.getImports().addAll(inputCompilationUnit.getImports());
+            outputCompilationUnit.setPackageDeclaration(inputCompilationUnit.getPackageDeclaration().orElse(null));
+
+            // Create the new class in the output unit
+            String className = inputCompilationUnit.getType(0).getNameAsString() + "_GPT";
+            ClassOrInterfaceDeclaration newClass = outputCompilationUnit.addClass(className);
+
+            // Build a StringBuilder for output content, starting with outputCompilationUnit content
+            StringBuilder outputContent = new StringBuilder(outputCompilationUnit.toString());
+
+            // Remove the empty newClass body created by JavaParser and append the opening of the new class manually
+            int classStartIndex = outputContent.indexOf("class " + className);
+            int classBodyStart = outputContent.indexOf("{", classStartIndex);
+            outputContent.setLength(classBodyStart + 1); // Truncate at the class opening brace
+
+            // Generate and append each modified method directly into the new class
+            for (MethodDeclaration method : newMethods) {
+                String modifiedMethodCode = model.generate(GPT_PROMPT_VALUE_SETS + method);
+                modifiedMethodCode = modifiedMethodCode.replace("```java", "").replace("```", "").trim();
+
+                // Append method code inside the class body, preserving comments and formatting
+                outputContent.append("\n\n").append(modifiedMethodCode).append("\n");
             }
-            System.out.println("GPT file created successfully at: " + outputFilePathGPT);
+
+            // Close the class and complete the file content
+            outputContent.append("}\n");
+
+            // Format the content using Google Java Format
+            String formattedContent;
+            try {
+                formattedContent = new Formatter().formatSource(outputContent.toString());
+            } catch (FormatterException e) {
+                throw new RuntimeException("Error formatting the Java source code", e);
+            }
+
+            // Write the formatted content to the output file
+            try (BufferedWriter writerGPT = new BufferedWriter(new FileWriter(outputFilePathGPT))) {
+                writerGPT.write(formattedContent);
+            }
+
+            System.out.println("GPT-enhanced file created successfully at: " + outputFilePathGPT);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+    public static void createGPTEnhancedTestFileOLD(String inputFilePath, List<MethodDeclaration> newMethods) {
+        String outputFilePathGPT = inputFilePath.replace(Paths.get(inputFilePath).getFileName().toString(),
+                Paths.get(inputFilePath).getFileName().toString().replace(".java", "_GPT.java"));
+
+        // Initialize your GPT model here
+        ChatLanguageModel model = OpenAiChatModel.builder()
+                .apiKey(ApiKeys.OPENAI_API_KEY)
+                .modelName("gpt-4o-mini")
+                .build();
+
+        try {
+            // Parse the input file for imports and class structure
+            CompilationUnit inputCompilationUnit = StaticJavaParser.parse(new File(inputFilePath));
+            CompilationUnit outputCompilationUnit = new CompilationUnit();
+
+            // Copy import statements to the output CompilationUnit
+            outputCompilationUnit.getImports().addAll(inputCompilationUnit.getImports());
+            outputCompilationUnit.setPackageDeclaration(inputCompilationUnit.getPackageDeclaration().orElse(null));
+
+            // Create a new class with the same name as original + "_GPT"
+            ClassOrInterfaceDeclaration newClass = outputCompilationUnit
+                    .addClass(inputCompilationUnit.getType(0).getNameAsString() + "_GPT");
+
+            // Generate and add each new method with GPT enhancements
+            for (MethodDeclaration method : newMethods) {
+                String modifiedMethodCode = model.generate(GPT_PROMPT_VALUE_SETS + method);
+                modifiedMethodCode = modifiedMethodCode.replace("```java", "").replace("```", "").trim();
+
+                // Parse `modifiedMethodCode` as a BodyDeclaration, which preserves comments and formatting
+                BodyDeclaration<?> modifiedMethodBody = StaticJavaParser.parseBodyDeclaration(modifiedMethodCode);
+                newClass.addMember(modifiedMethodBody);
+            }
+
+            // Write the modified CompilationUnit to the output file
+            try (BufferedWriter writerGPT = new BufferedWriter(new FileWriter(outputFilePathGPT))) {
+                writerGPT.write(outputCompilationUnit.toString());
+            }
+
+            System.out.println("GPT-enhanced file created successfully at: " + outputFilePathGPT);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -281,11 +373,11 @@ public class Refactor2Refresh {
         );
 
         // Find the first class declaration in the file (assuming it's a single class per file)
-        ClassOrInterfaceDeclaration originalClass = compilationUnit.getClassByName(originalFile.getName().replace("_Atomized.java", ""))
+        ClassOrInterfaceDeclaration originalClass = compilationUnit.getClassByName(originalFile.getName().replace(".java", ""))
                 .orElseThrow(() -> new IllegalArgumentException("No class found in the file."));
 
         // Create a new class name with the suffix "Parameterized"
-        String newClassName = originalClass.getNameAsString() + "_Parameterized";
+        String newClassName = originalClass.getNameAsString().replace("Purified", "Parameterized");
 
         // Clone the original class to preserve all other details (fields, imports, etc.)
         ClassOrInterfaceDeclaration newClass = originalClass.clone();
@@ -302,7 +394,7 @@ public class Refactor2Refresh {
         compilationUnit.addType(newClass);  // Add the new class
 
         // Define the new file path with "Parameterized" suffix
-        String newFileName = originalFile.getName().replace(".java", "Parameterized.java");
+        String newFileName = originalFile.getName().replace("Purified.java", "Parameterized.java");
         Path newFilePath = Paths.get(originalFile.getParent(), newFileName);
 
         // Write the updated CompilationUnit to the new file
@@ -313,192 +405,396 @@ public class Refactor2Refresh {
         System.out.println("Parameterized test file created at: " + newFilePath.toString());
         return newFilePath.toString();
     }
-    static void oldUnorganisedCode(String input_file) throws IOException {
-        CompilationUnit cu = configureJavaParserAndGetCompilationUnit(input_file);
 
-        System.out.println("****************************************************************");
-        System.out.println("****************************************************************");
-        System.out.println("****************************************************************");
+    public static String createPurifiedTestFile(String inputFilePath) throws IOException {
+        // Parse the input Java test file
+        CompilationUnit inputCompilationUnit = StaticJavaParser.parse(new File(inputFilePath));
 
+        // Get the original class and create the new class with "_Purified" suffix
+        ClassOrInterfaceDeclaration originalClass = inputCompilationUnit.getClassByName(inputCompilationUnit.getType(0).getNameAsString())
+                .orElseThrow(() -> new RuntimeException("Class not found in the file"));
+        ClassOrInterfaceDeclaration newClass = new ClassOrInterfaceDeclaration();
+        newClass.setName(originalClass.getNameAsString() + "_Purified");
 
-        NodeList<Node> statementNodes1 = getASTStatementsForMethodByName(cu, "test1");
-        NodeList<Node> statementNodes2 = getASTStatementsForMethodByName(cu, "test2");
+        AtomicInteger counter = new AtomicInteger(1);
+        // For each test method, generate Purified tests for each assertion
+        originalClass.getMethods().stream()
+                .filter(method -> method.getAnnotationByName("Test").isPresent())
+                .forEach(testMethod -> {
+                    // Collect all assert statements for backward slicing
+                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
+                            .stream()
+                            .filter(call -> call.getNameAsString().startsWith("assert"))
+                            .collect(Collectors.toList());
 
-        // Get Trie Like Nodes from AST
-        TreeMap<Integer, ArrayList<String>> parameter_to_values_map = new TreeMap<Integer, ArrayList<String>>();
+                    // Generate a separate test method for each assertion
+                    assertions.forEach(assertStatement -> {
+                        // Clone the original method to create an Purified version
+                        MethodDeclaration purifiedMethod = testMethod.clone();
+                        String methodName = testMethod.getNameAsString() + "_" + counter.getAndIncrement();
+                        purifiedMethod.setName(methodName);
 
-        HashMap<String, SlicingUtils.Variable> variableMap1 = new HashMap<String, SlicingUtils.Variable>();
-        HashMap<String, SlicingUtils.Variable> variableMap2 = new HashMap<String, SlicingUtils.Variable>();
-        HashMap<String, Integer> hardcodedMap1 = new HashMap<String, Integer>();
-        HashMap<String, Integer> hardcodedMap2 = new HashMap<String, Integer>();
+                        // Remove all assertions except the current one
+                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
+                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
+                                call.getParentNode().ifPresent(Node::remove);
+                            }
+                        });
 
-        ArrayList<TrieLikeNode> trie1 = SlicingUtils.createTrieFromStatements(statementNodes1, hardcodedMap1, parameter_to_values_map);
-        ArrayList<TrieLikeNode> trie2 = SlicingUtils.createTrieFromStatements(statementNodes2, hardcodedMap2, parameter_to_values_map);
-        SlicingUtils slicingUtils = new SlicingUtils();
-        slicingUtils.populateVariableMapFromTrie(trie1, variableMap1);
-        slicingUtils.populateVariableMapFromTrie(trie2, variableMap2);
-        HashMap<String, String> crossVariableMap = new HashMap<String, String>();
-        if(SlicingUtils.compareTrieLists(trie1, trie2, crossVariableMap)) {
-            System.out.println("Tests are similar enough to be retrofitted together");
-        } else {
-            System.out.println("Tests can't be retrofitted together");
-            return;
+                        // Perform slicing to retain only relevant statements for this assertion
+                        performSlicing(purifiedMethod, assertStatement);
+
+                        // Add the purified test method to the new class
+                        newClass.addMember(purifiedMethod);
+                    });
+                });
+
+        // Create the output compilation unit with package and imports
+        CompilationUnit outputCompilationUnit = new CompilationUnit();
+        outputCompilationUnit.setPackageDeclaration(inputCompilationUnit.getPackageDeclaration().orElse(null));
+        outputCompilationUnit.getImports().addAll(inputCompilationUnit.getImports());
+        outputCompilationUnit.addType(newClass);
+
+        // Write the new compilation unit to a file with "_Purified" suffix in the name
+        String outputFilePath = inputFilePath.replace(".java", "_Purified.java");
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(outputFilePath))) {
+            writer.write(outputCompilationUnit.toString());
         }
 
-        String packagePath = cu.getPackageDeclaration().map(NodeWithName::getNameAsString).orElse("").replace(".", "/");
-        File packageDir = new File(outputDir, packagePath);
-        packageDir.mkdirs();
-        // update below
-        CompilationUnit cu2 = StaticJavaParser.parse(new File("/Users/monilnarang/Documents/Repos/Research/JavaSlicer/examples/AssertionPasta/Pasta.java"));
+        return outputFilePath;
+    }
 
-        Optional<MethodDeclaration> methodOpt = cu2.findAll(MethodDeclaration.class).stream()
-                .filter(m -> m.getNameAsString().equals("test1"))
-                .findFirst();
-        if (methodOpt.isPresent()) {
-            MethodDeclaration method = methodOpt.get();
+    private static void performSlicing(MethodDeclaration method, MethodCallExpr assertion) {
+        // Collect variables used in the assertion
+        Set<String> requiredVariables = getVariablesUsedInAssertion(assertion);
 
-            // add parameters : replace hardcoded and add in signature
-            for (int i = 0; i < parameter_to_values_map.size(); i++) {
-                ArrayList<String> values = parameter_to_values_map.get(i + 1);  // TreeMap keys start from 1 in this example
-                if (values != null && !values.isEmpty()) {
-                    // Initial value is the first element of the array
-                    String initialValue = values.get(0);
-                    // Construct parameter name
-                    String parameterName = "param" + (i + 1);
-                    // Print the initial value and parameter name
-//                    System.out.println("Initial value: " + initialValue + ", Parameter name: " + parameterName);
-                    method.addParameter(int.class, parameterName);
-                    // Traverse the method body to find and replace the hardcoded value
-                    method.findAll(LiteralStringValueExpr.class).forEach(literalExpr -> {
-                        if (literalExpr.getValue().equals(initialValue)) {
-                            literalExpr.replace(new NameExpr(parameterName));
+        // Iterate over statements in reverse order to determine which ones to keep
+        List<Statement> statements = method.getBody().orElseThrow().getStatements();
+        for (int i = statements.size() - 1; i >= 0; i--) {
+            Statement stmt = statements.get(i);
+
+            // Check if the statement is an expression that declares or assigns a variable
+            if (stmt.isExpressionStmt()) {
+                ExpressionStmt exprStmt = stmt.asExpressionStmt();
+                Expression expr = exprStmt.getExpression();
+
+                // If the expression is an assignment, check the variable it defines
+                if (expr.isAssignExpr()) {
+                    AssignExpr assignExpr = expr.asAssignExpr();
+                    String varName = assignExpr.getTarget().toString();
+
+                    // Retain the statement if it defines a required variable, and add new dependencies
+                    if (requiredVariables.contains(varName)) {
+                        requiredVariables.addAll(getVariablesUsedInExpression(assignExpr.getValue()));
+                    } else {
+                        // Remove the statement if it doesn't define a required variable
+                        stmt.remove();
+                    }
+                } else if (expr.isVariableDeclarationExpr()) {
+                    // Handle variable declarations
+                    expr.asVariableDeclarationExpr().getVariables().forEach(var -> {
+                        String varName = var.getNameAsString();
+
+                        // Retain the statement if it defines a required variable, and add new dependencies
+                        if (requiredVariables.contains(varName)) {
+                            requiredVariables.addAll(getVariablesUsedInExpression(var.getInitializer().orElse(null)));
+                        } else {
+                            // Remove the statement if it doesn't define a required variable
+                            stmt.remove();
                         }
                     });
                 }
             }
-
-            // Remove the @Test annotation
-            method.getAnnotations().removeIf(annotation -> annotation.getNameAsString().equals("Test"));
-            // Add the @ParameterizedTest annotation
-            method.addAnnotation(new MarkerAnnotationExpr("ParameterizedTest"));
-            // change name of methods to "parameterisedTest"
-            method.setName("parameterisedTest");
-            NormalAnnotationExpr csvSourceAnnotation = new NormalAnnotationExpr();
-            // Construct the CSV source values
-            List<String> csvRows = IntStream.range(0, parameter_to_values_map.get(1).size())
-                    .mapToObj(i -> parameter_to_values_map.values().stream()
-                            .map(list -> list.get(i))
-                            .collect(Collectors.joining(", ")))
-                    .collect(Collectors.toList());
-
-            String csvSourceValues = csvRows.stream()
-                    .collect(Collectors.joining("\", \"", "\"", "\""));
-
-            // Add the @CsvSource annotation
-            csvSourceAnnotation.setName("CsvSource");
-            csvSourceAnnotation.addPair("value", "{" + csvSourceValues + "}");
-
-            method.addAnnotation(csvSourceAnnotation);
-
-            // Print the modified method
-            System.out.println("Modified method:");
-            System.out.println(method);
-        } else {
-            System.out.println("Method 'parameterisedTest' not found.");
-        }
-
-        // Find all methods in the compilation unit and delete everything except the method we modified
-        // delete everything except the method with name parameterisedTest
-        List<MethodDeclaration> methods = cu2.findAll(MethodDeclaration.class);
-        methods.stream()
-                .filter(method -> !method.getNameAsString().equals("parameterisedTest"))
-                .forEach(method -> method.remove());
-
-
-        methodOpt = cu2.findAll(MethodDeclaration.class).stream()
-                .filter(m -> m.getNameAsString().equals("parameterisedTest"))
-                .findFirst();
-        if (methodOpt.isPresent()) {
-            MethodDeclaration method = methodOpt.get();
-            // call GPT to generate the value sets
-            ChatLanguageModel model = OpenAiChatModel.builder()
-                    .apiKey(ApiKeys.OPENAI_API_KEY)
-                    .modelName("gpt-4o-mini")
-                    .build();
-
-            String answer = model.generate(GPT_PROMPT_VALUE_SETS + method);
-            System.out.println("Modified Method with GPT Generated Value Sets \n" + answer);
-        }
-
-        File javaFile = new File(packageDir, cu.getStorage().get().getFileName());
-        try (PrintWriter pw = new PrintWriter(javaFile)) {
-            pw.print(new BlockComment(getDisclaimer(cu2.getStorage().get())));
-//            LiteralStringValueExpr intLiteralExpr = (LiteralStringValueExpr) cu2.getChildNodes().get(1).getChildNodes().get(3).getChildNodes().get(3).getChildNodes().get(0).getChildNodes().get(0).getChildNodes().get(0).getChildNodes().get(2).getChildNodes().get(1);
-//            intLiteralExpr.setValue("7");
-            pw.print(cu2);
-        } catch (FileNotFoundException e) {
-            System.err.println("Could not write file " + javaFile);
         }
     }
 
-    static String generateNewFileWithAtomizeTests(String inputFilePath) throws FileNotFoundException {
-        try {
-            // Read the content of the input Java test file
-            System.out.println("Reading input file: " + inputFilePath);
-            String fileContent = new String(Files.readAllBytes(Paths.get(inputFilePath)));
+    // Helper method to get all variables used in an assertion
+    static Set<String> getVariablesUsedInAssertion(MethodCallExpr assertion) {
+        Set<String> variables = new HashSet<>();
+        assertion.getArguments().forEach(arg -> variables.addAll(getVariablesUsedInExpression(arg)));
+        return variables;
+    }
 
+    // Helper method to recursively get all variables used in an expression
+    private static Set<String> getVariablesUsedInExpression(Expression expression) {
+        Set<String> variables = new HashSet<>();
+        if (expression == null) return variables;
 
-            // Build the OpenAiChatModel instance using your OpenAI API key
-            System.out.println("Creating OpenAI model");
-            ChatLanguageModel model = OpenAiChatModel.builder()
-                    .apiKey(ApiKeys.OPENAI_API_KEY)
-                    .modelName("gpt-4o-mini")
-                    .build();
+        expression.walk(NameExpr.class, nameExpr -> variables.add(nameExpr.getNameAsString()));
+        return variables;
+    }
 
-            // Combine the prompt with the test file content
-            String fullPrompt = GPT_PROMPT_ATOMIZED_TESTS + "\n\n" + fileContent;
+    public static boolean hasIndependentTests(List<MethodDeclaration> purifiedTestsOfOriginalTest) {
+        for (int i = 0; i < purifiedTestsOfOriginalTest.size(); i++) {
+            MethodDeclaration test1 = purifiedTestsOfOriginalTest.get(i);
+            List<String> test1Lines = extractNonAssertionLines(test1);
 
-            // Send the prompt to the model and get the atomized test cases
-            System.out.println("Running GPT model to atomize test cases");
-            String atomizedTests = model.generate(fullPrompt);
-            atomizedTests = atomizedTests.replace("```java", "").replace("```", "").trim();
+            for (int j = i + 1; j < purifiedTestsOfOriginalTest.size(); j++) {
+                MethodDeclaration test2 = purifiedTestsOfOriginalTest.get(j);
+                List<String> test2Lines = extractNonAssertionLines(test2);
 
-            // Generate the output file path
-            String outputFilePath = inputFilePath.replace(Paths.get(inputFilePath).getFileName().toString(), Paths.get(inputFilePath).getFileName().toString().replace(".java", "_Atomized.java"));
-            // Write the generated atomized tests to the output file
-            System.out.println("Writing atomized test cases to output file");
-            Files.write(Paths.get(outputFilePath), atomizedTests.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-
-            System.out.println("Atomized test cases have been written to " + outputFilePath);
-            return outputFilePath;
-
-        } catch (IOException e) {
-            System.err.println("Error reading/writing file: " + e.getMessage());
-            throw new RuntimeException(e);
-        } catch (RuntimeException e) {
-            System.err.println("Error with GPT model: " + e.getMessage());
+                if (areTestsIndependent(test1Lines, test2Lines)) {
+                    System.out.println("Independent tests found: " + test1.getNameAsString() + " and " + test2.getNameAsString());
+                    return true; // Found two independent tests
+                }
+            }
         }
-        return null;
+        return false; // No independent tests found
+    }
+
+    public static boolean areTestsIndependent(List<String> test1Lines, List<String> test2Lines) {
+        // Use a HashSet for efficient lookups
+        Set<String> test1Set = new HashSet<>(test1Lines);
+
+        // Check if any line in test2Lines exists in test1Set
+        for (String line : test2Lines) {
+            if (test1Set.contains(line)) {
+                return false; // Common line found, tests are not independent
+            }
+        }
+        return true; // No common line found, tests are independent
+    }
+
+    private static List<String> extractNonAssertionLines(MethodDeclaration test) {
+        List<String> lines = new ArrayList<>();
+        String[] bodyLines = test.getBody().toString().split("\n");
+
+        for (String line : bodyLines) {
+            line = line.trim();
+            // Exclude assertions and comments
+            if (!line.startsWith("assert") && !line.startsWith("//") && !line.isEmpty()) {
+                lines.add(line);
+            }
+        }
+        // remove the first and last lines which are { and }
+        lines.remove(0);
+        lines.remove(lines.size() - 1);
+        return lines;
+    }
+
+    private static boolean isSubset(List<String> smaller, List<String> larger) {
+        Set<String> largerSet = new HashSet<>(larger);
+        for (String line : smaller) {
+            if (!largerSet.contains(line)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static TestFileResult identifyAssertionPastas(String inputFilePath) throws IOException {
+        System.out.println("Identifying assertion pastas in file: " + inputFilePath);
+        System.out.println("\n Test Method : Status");
+        // Parse the input Java test file
+        CompilationUnit inputCompilationUnit = StaticJavaParser.parse(new File(inputFilePath));
+
+        // Get the original class and create the new class with "_Purified" suffix
+        ClassOrInterfaceDeclaration originalClass = inputCompilationUnit.getClassByName(inputCompilationUnit.getType(0).getNameAsString())
+                .orElseThrow(() -> new RuntimeException("Class not found in the file"));
+        AtomicInteger totalTests = new AtomicInteger();
+        AtomicInteger AssertionPastaCount = new AtomicInteger();
+
+        // For each test method, generate purified tests for each assertion
+        originalClass.getMethods().stream()
+                .filter(method -> method.getAnnotationByName("Test").isPresent())
+                .forEach(testMethod -> {
+                    totalTests.getAndIncrement();
+                    AtomicInteger counter = new AtomicInteger(1);
+                    List<MethodDeclaration> purifiedTestsOfOriginalTest = new ArrayList<>();
+                    // Collect all assert statements for backward slicing
+                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
+                            .stream()
+                            .filter(call -> call.getNameAsString().startsWith("assert"))
+                            .collect(Collectors.toList());
+
+                    // Generate a separate test method for each assertion
+                    assertions.forEach(assertStatement -> {
+                        // Clone the original method to create an purified version
+                        MethodDeclaration purifiedMethod = testMethod.clone();
+                        String methodName = testMethod.getNameAsString() + "_" + counter.getAndIncrement();
+                        purifiedMethod.setName(methodName);
+
+                        // Remove all assertions except the current one
+                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
+                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
+                                call.getParentNode().ifPresent(Node::remove);
+                            }
+                        });
+
+                        // Perform slicing to retain only relevant statements for this assertion
+                        performSlicing(purifiedMethod, assertStatement);
+//                        DynamicSlicingAnalyzer.performDynamicSlicing(purifiedMethod, assertStatement);
+//                        DynamicSlicer.performDynamicSlicing(purifiedMethod, assertStatement);
+
+                        // Add the purified test method to the list
+                        purifiedTestsOfOriginalTest.add(purifiedMethod);
+                    });
+                    boolean hasIndependentTests = hasIndependentTests(purifiedTestsOfOriginalTest);
+                    System.out.println(testMethod.getNameAsString() + " : " + (hasIndependentTests ? "Pasta" : " Inseparable"));
+                    if (hasIndependentTests) {
+                        AssertionPastaCount.getAndIncrement();
+                    }
+                });
+        TestFileResult result = new TestFileResult(inputFilePath, totalTests.get(), AssertionPastaCount.get(),
+                totalTests.get() > 0 ? (AssertionPastaCount.get() * 100.0 / totalTests.get()) : 0.0);
+        System.out.println("\n Total tests: " + totalTests.get());
+        System.out.println("Assertion Pasta count: " + AssertionPastaCount.get());
+        System.out.println("Assertion Pasta Percentage: " + (AssertionPastaCount.get() * 100.0 / totalTests.get()) + "%");
+        return result;
+    }
+
+    private static boolean isTestFile(String filePath) {
+        // Get the file name from the path
+        String fileName = Paths.get(filePath).getFileName().toString();
+        // Check if it's a Java file and starts with "Test"
+        return fileName.endsWith(".java") &&
+                fileName.startsWith("Test") &&
+                !filePath.contains("/target/") && // Exclude compiled files
+                !filePath.contains("/build/");    // Exclude build directories
+    }
+
+    private static TestFileResult parseOutput(String output, String filePath) {
+        try {
+            // Split output into lines
+            String[] lines = output.split("\n");
+
+            // Extract metrics from the output
+            int totalTests = 0;
+            int pastaCount = 0;
+            double pastaPercentage = 0.0;
+
+            for (String line : lines) {
+                if (line.startsWith("Total tests:")) {
+                    totalTests = Integer.parseInt(line.split(":")[1].trim());
+                } else if (line.startsWith("Assertion Pasta count:")) {
+                    pastaCount = Integer.parseInt(line.split(":")[1].trim());
+                } else if (line.startsWith("Assertion Pasta Percentage:")) {
+                    pastaPercentage = Double.parseDouble(line.split(":")[1].trim().replace("%", ""));
+                }
+            }
+
+            return new TestFileResult(filePath, totalTests, pastaCount, pastaPercentage);
+        } catch (Exception e) {
+            System.err.println("Error parsing output for file: " + filePath);
+            return null;
+        }
+    }
+
+    private static void generateReport(List<TestFileResult> results, String repositoryPath) {
+        try {
+            String reportPath = Paths.get(repositoryPath, "assertion_pasta_report.md").toString();
+            try (PrintWriter writer = new PrintWriter(new FileWriter(reportPath))) {
+                // Write report header
+                writer.println("# Assertion Pasta Analysis Report");
+                writer.println("\nRepository: " + repositoryPath);
+                writer.println("\nAnalysis Date: " + new Date());
+                writer.println("\n## Summary");
+
+                // Calculate total metrics
+                int totalTestFiles = results.size();
+                int totalTests = results.stream().mapToInt(r -> r.totalTests).sum();
+                int totalPasta = results.stream().mapToInt(r -> r.pastaCount).sum();
+                double overallPercentage = totalTests > 0 ?
+                        (totalPasta * 100.0 / totalTests) : 0.0;
+
+                writer.println("\n- Total Test Files Analyzed: " + totalTestFiles);
+                writer.println("- Total Test Methods: " + totalTests);
+                writer.println("- Total Assertion Pasta Cases: " + totalPasta);
+                writer.printf("- Overall Assertion Pasta Percentage: %.2f%%\n", overallPercentage);
+
+                // Write detailed results table
+                writer.println("\n## Detailed Results\n");
+                writer.println("| S No. | Test File | Total Tests | Assertion Pasta Count | Assertion Pasta Percentage |");
+                writer.println("|-----|-----------|-------------|---------------------|--------------------------|");
+                AtomicInteger count = new AtomicInteger();
+                results.stream()
+                        .sorted((r1, r2) -> Double.compare(r2.pastaCount, r1.pastaCount))
+                        .forEach(result -> {
+                            String relativePath = Paths.get(repositoryPath)
+                                    .relativize(Paths.get(result.filePath))
+                                    .toString();
+                            writer.printf("| %d | %s | %d | %d | %.2f%% |\n",
+                                    count.incrementAndGet(),
+                                    relativePath,
+                                    result.totalTests,
+                                    result.pastaCount,
+                                    result.pastaPercentage);
+                        });
+
+                System.out.println("Report generated successfully: " + reportPath);
+            }
+        } catch (IOException e) {
+            System.err.println("Error generating report: " + e.getMessage());
+        }
+    }
+
+    public static void detectAssertionPastaAndGenerateReport(String pathToJavaRepository) throws IOException {
+        // locates and read all the test files in the path folder
+        // detects assertion pasta in each test file : use identifyAssertionPastas(inputFile);
+        // generates a report file which has a table and results. 4 columns: Test File Name, Total Tests, Assertion Pasta Count, Assertion Pasta Percentage
+        List<TestFileResult> results = new ArrayList<>();
+
+        // Find all Java test files in the repository
+        Files.walk(Paths.get(pathToJavaRepository))
+                .filter(Files::isRegularFile)
+                .filter(path -> isTestFile(path.toString()))
+                .forEach(path -> {
+                    try {
+                        // Process the test file
+                        // Parse the output to extract metrics
+                        TestFileResult result = identifyAssertionPastas(path.toString());
+                        if (result != null) {
+                            results.add(result);
+                        }
+                    } catch (Exception e) {
+                        System.err.println("Error processing file: " + path);
+                        e.printStackTrace();
+                    }
+                });
+        generateReport(results, pathToJavaRepository);
     }
     public static void main(String[] args) throws IOException {
-        if (args.length == 0) {
+        if (args.length < 2) {
             throw new IllegalArgumentException("Please provide the path to the input file as an argument.");
         }
         String inputFile = args[0];
-        // oldUnorganisedCode(inputFile);
+        String operation = args[1];
+        if(operation.equals("detect")) {
+//             identifyAssertionPastas(inputFile);
+            detectAssertionPastaAndGenerateReport(inputFile);
+//            TestCoverageGenerator.generateCoverage(inputFile);
+        }
+        else if (operation.equals("detectin")) {
+            identifyAssertionPastas(inputFile);
+        }
+        else if(operation.equals("fix")) {
+            String purifiedTestsFile = createPurifiedTestFile(inputFile);
+            System.out.println( "Purified test file created: " + purifiedTestsFile);
 
-        String atomizedTestsFile = generateNewFileWithAtomizeTests(inputFile);
-        // Todo: Quality check -> test if the new test file is runnable and has the exact same coverage.
+            CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedTestsFile);
+            // Later Quality check -> [runnable] [same coverage]
+            List<String> listTestMethods = extractMethodListFromCU(cu);
+            HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
+            List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
+            // ToDo : Impl logic to merge similar tests together
+            // create map: similarTestGroups - > lists of params for each group
 
-
-        CompilationUnit cu = configureJavaParserAndGetCompilationUnit(atomizedTestsFile);
-        List<String> listTestMethods = extractMethodListFromCU(cu);
-        HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
-        List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
-        List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
-        String putsFile = createParameterizedTestFile(atomizedTestsFile, newPUTs);
-        createGPTEnhancedTestFile(putsFile, newPUTs);
+            List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
+            String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs);
+            createGPTEnhancedTestFile(putsFile, newPUTs);
+            // ToDo: Add logic to merge separate PUTs into a single PUT
+            // ToDo: Experiment on hadoop old dataset test files
+            // Later: Quality check -> [runnable] [same or more coverage]
+            // Later: [handling failing tests]
+        } else {
+            throw new IllegalArgumentException("Invalid operation. Please provide either 'detect' or 'fix'.");
+        }
     }
 }
+
+
+
+
+
 
 

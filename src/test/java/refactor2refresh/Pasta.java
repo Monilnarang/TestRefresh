@@ -11,12 +11,12 @@ public class Pasta {
         int c = 16;
         int d = 15;
         int cd = d + 16;
-        Assert.assertEquals(ab, a + b);
-        Assert.assertEquals(cd, c + d);
-        Assert.assertEquals(42, a + b + c + d);
-        Assert.assertEquals(42, ab + cd);
-        Assert.assertEquals(42, ab + c + d);
-        Assert.assertEquals(42, a + b + cd);
+        assertEquals(ab, a + b); // 8 9 10
+        assertEquals(42, a + b + c + d); // 8 9 11 12
+        assertEquals(42, ab + cd); // 8 10 12 13
+        assertEquals(42, ab + c + d); // 8 10 11 12
+        assertEquals(42, a + b + cd); // 8 9 12 13
+        assertEquals(cd, c + d); // 11 12 13
     }
 
     @Test
@@ -25,7 +25,7 @@ public class Pasta {
         AddObj b = new AddObj(2);
         AddObj a1 = new AddObj(15);
         AddObj b1 = new AddObj(17);
-        Assert.assertEquals(3, AddObj.add(a, b));
-        Assert.assertEquals(32, AddObj.add(a1, b1));
+        assertEquals(3, AddObj.add(a, b)); // 24 25
+        assertEquals(32, AddObj.add(a1, b1)); // 26 27
     }
 }
