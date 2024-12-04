@@ -1,10 +1,12 @@
 package refactor2refresh;
 
+import com.github.javaparser.ast.Modifier;
 import com.github.javaparser.ast.Node;
 import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.*;
 import com.github.javaparser.ast.stmt.ExpressionStmt;
+import com.github.javaparser.ast.type.ArrayType;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.github.javaparser.ast.type.PrimitiveType;
 
@@ -27,6 +29,7 @@ enum StatementType {
     POSTFIX_DECREMENT,
     PREFIX_INCREMENT,
     PREFIX_DECREMENT,
+    ARRAY_TYPE, ARRAY_INITIALIZER_EXPR, BOOLEAN_LITERAL,
 }
 public class SlicingUtils {
     private HashMap<String, ArrayList<String>> variableMap = new HashMap<String, ArrayList<String>>(); // key: variable name, value: variable type & variable value
@@ -120,7 +123,48 @@ public class SlicingUtils {
                     stmtNode.type = StatementType.VARIABLE_DECLARATOR;
                     stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
                 }
-            } else if (stmt instanceof ClassOrInterfaceType) {
+            } else if (stmt instanceof ArrayType) {
+                ArrayType arrayType = ((ArrayType) stmt).clone();  // Clone the array type
+                if (arrayType.getChildNodes().size() > 0) {
+                    NodeList<Node> childNodes = new NodeList<>();
+                    int arrayTypeSize = arrayType.getChildNodes().size();
+                    for (int i = 0; i < arrayTypeSize; i++) {
+                        childNodes.add(arrayType.getChildNodes().get(i).clone());  // Clone each child node
+                    }
+                    stmtNode.type = StatementType.ARRAY_TYPE;
+                    stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
+                }
+            }
+            else if (stmt instanceof ArrayInitializerExpr) {
+                ArrayInitializerExpr arrayInitExpr = ((ArrayInitializerExpr) stmt).clone();  // Clone the array initializer expression
+                StringBuilder arrayValue = new StringBuilder("{");
+                boolean first = true;
+
+                for (Node child : arrayInitExpr.getChildNodes()) {
+                    if (!first) {
+                        arrayValue.append(", ");
+                    }
+                    first = false;
+                    arrayValue.append(child.toString());  // Convert each child node to string and append
+                }
+                arrayValue.append("}");
+
+                stmtNode.value = arrayValue.toString();  // Store the entire array as a single value
+                stmtNode.type = StatementType.LITERAL;  // Treat as a literal
+            }
+//            else if (stmt instanceof ArrayInitializerExpr) {
+//                ArrayInitializerExpr arrayInitExpr = ((ArrayInitializerExpr) stmt).clone();  // Clone the array initializer expression
+//                if (arrayInitExpr.getChildNodes().size() > 0) {
+//                    NodeList<Node> childNodes = new NodeList<>();
+//                    int arrayInitExprSize = arrayInitExpr.getChildNodes().size();
+//                    for (int i = 0; i < arrayInitExprSize; i++) {
+//                        childNodes.add(arrayInitExpr.getChildNodes().get(i).clone());  // Clone each child node
+//                    }
+//                    stmtNode.type = StatementType.ARRAY_INITIALIZER_EXPR;
+//                    stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
+//                }
+//            }
+            else if (stmt instanceof ClassOrInterfaceType) {
                 ClassOrInterfaceType classOrInterfaceType = ((ClassOrInterfaceType) stmt).clone();  // Clone the class or interface type
                 if (classOrInterfaceType.getChildNodes().size() > 0) {
                     NodeList<Node> childNodes = new NodeList<>();
@@ -178,7 +222,15 @@ public class SlicingUtils {
                 stmtNode.type = StatementType.LITERAL;
             } else if (stmt instanceof PrimitiveType) {
                 stmtNode.type = StatementType.PRIMITIVE;
-            } else {
+            } else if (stmt instanceof BooleanLiteralExpr) {
+                BooleanLiteralExpr booleanExpr = ((BooleanLiteralExpr) stmt).clone();  // Clone the boolean literal expression
+                stmtNode.type = StatementType.BOOLEAN_LITERAL;
+                stmtNode.value = Boolean.toString(booleanExpr.getValue());  // Convert the boolean value to string ("true" or "false")
+            }
+            else if (stmt instanceof Modifier) {
+                stmtNode.type = StatementType.PRIMITIVE;
+            }
+            else {
                 throw new IllegalStateException("Unexpected value: " + stmt);
             }
 
@@ -471,7 +523,15 @@ public class SlicingUtils {
                 if(trie1.children.get(0).type != trie2.children.get(0).type)
                     return false;
             } else {
-                if(!trie1.children.get(0).children.get(0).value.equals(trie2.children.get(0).children.get(0).value))
+//                if(trie1.children.get(0).type == StatementType.ARRAY_TYPE && trie2.children.get(0).type == StatementType.ARRAY_TYPE) {
+//                    if(trie1.children.get(2).children.size() != trie2.children.get(2).children.size())
+//                        return false;
+//                    for (int i=0; i<trie1.children.get(2).children.size(); i++) {
+//                        if(!trie1.children.get(2).children.get(i).value.equals(trie2.children.get(2).children.get(i).value))
+//                            return false;
+//                    }
+//                } else
+                    if(!trie1.children.get(0).children.get(0).value.equals(trie2.children.get(0).children.get(0).value))
                     return false;
             }
 //            String type1 = trie1.children.get(0).children.get(0).value;

@@ -11,7 +11,10 @@ import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.body.BodyDeclaration;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.*;
+import com.github.javaparser.ast.stmt.BlockStmt;
+import com.github.javaparser.ast.type.Type;
 import com.google.googlejavaformat.java.Formatter;
 import com.google.googlejavaformat.java.FormatterException;
 import com.github.javaparser.ast.stmt.ExpressionStmt;
@@ -173,6 +176,58 @@ public class Refactor2Refresh {
         return similarTestGroups;
     }
 
+    private static String generateParameterizedTestName(List<UnitTest> group) {
+        if (group == null || group.isEmpty()) {
+            throw new IllegalArgumentException("Group cannot be null or empty");
+        }
+
+        // Extract the base name from the first test (e.g., "testCamelize" from "testCamelize_1")
+        String baseName = group.get(0).Name.replaceAll("_\\d+$", "");
+
+        // Collect numeric suffixes from the test names
+        List<Integer> testNumbers = new ArrayList<>();
+        for (UnitTest unitTest : group) {
+            String testName = unitTest.Name;
+            String numberPart = testName.replaceAll("^.*_(\\d+)$", "$1");
+            try {
+                testNumbers.add(Integer.parseInt(numberPart));
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid test name format: " + testName, e);
+            }
+        }
+
+        // Sort the numbers to identify ranges
+        Collections.sort(testNumbers);
+
+        // Identify ranges
+        StringBuilder rangeBuilder = new StringBuilder();
+        int rangeStart = testNumbers.get(0);
+        int previous = rangeStart;
+
+        for (int i = 1; i < testNumbers.size(); i++) {
+            int current = testNumbers.get(i);
+            if (current != previous + 1) { // End of a range
+                if (rangeStart == previous) {
+                    rangeBuilder.append(rangeStart).append("_");
+                } else {
+                    rangeBuilder.append(rangeStart).append("to").append(previous).append("_");
+                }
+                rangeStart = current; // Start a new range
+            }
+            previous = current;
+        }
+
+        // Handle the last range
+        if (rangeStart == previous) {
+            rangeBuilder.append(rangeStart);
+        } else {
+            rangeBuilder.append(rangeStart).append("to").append(previous);
+        }
+
+        // Construct and return the new test name
+        return baseName + "_" + rangeBuilder.toString();
+    }
+
     private static Class<?> inferType(LiteralStringValueExpr expr) {
         if (expr instanceof IntegerLiteralExpr) {
             return int.class;
@@ -192,14 +247,16 @@ public class Refactor2Refresh {
     static List<MethodDeclaration> retrofitSimilarTestsTogether(List<List<UnitTest>> similarTestGroups, CompilationUnit cu) {
         List<MethodDeclaration> newPUTsList = new ArrayList<>();
         for( List<UnitTest> group : similarTestGroups) {
+            if(group.size() < 2) {
+                continue;
+            }
             TreeMap<Integer, ArrayList<LiteralStringValueExpr>> parameter_to_values_map = new TreeMap<Integer, ArrayList<LiteralStringValueExpr>>();
             String firstTestName = group.get(0).Name;
-            String newTestName = "parameterisedTest_";
+            String newTestName = generateParameterizedTestName(group);
             for( UnitTest unitTest : group) {
-                newTestName += unitTest.Name + "_";
                 HashMap<String, SlicingUtils.Variable> variableMap = new HashMap<String, SlicingUtils.Variable>();
                 HashMap<String, Integer> hardcodedMap = new HashMap<String, Integer>();
-                ArrayList<TrieLikeNode> trie = SlicingUtils.createTrieFromStatements(unitTest.Statements, hardcodedMap, parameter_to_values_map);
+                ArrayList<TrieLikeNode> trie = SlicingUtils.createTrieFromStatementsNew(unitTest.Statements, hardcodedMap, parameter_to_values_map);
             }
             // extract method 1 from cu
             Optional<MethodDeclaration> methodOpt = cu.findAll(MethodDeclaration.class).stream()
@@ -210,15 +267,12 @@ public class Refactor2Refresh {
 
                 // add parameters : replace hardcoded and add in signature
                 for (int i = 0; i < parameter_to_values_map.size(); i++) {
-//                    ArrayList<String> values = parameter_to_values_map.get(i + 1);
                     ArrayList<LiteralStringValueExpr> values = parameter_to_values_map.get(i + 1); // TreeMap keys start from 1 in this example
                     if (values != null && !values.isEmpty()) {
-//                        String initialValue = values.get(0);
                         LiteralStringValueExpr initialValue = values.get(0);
                         String parameterName = "param" + (i + 1);
                         Class<?> parameterType = inferType(initialValue);
                         method.addParameter(parameterType, parameterName);
-//                        method.addParameter(int.class, parameterName);
                         method.findAll(LiteralStringValueExpr.class).forEach(literalExpr -> {
                             if (literalExpr.getValue().equals(initialValue.getValue())) {
                                 literalExpr.replace(new NameExpr(parameterName));
@@ -229,23 +283,36 @@ public class Refactor2Refresh {
                 method.getAnnotations().removeIf(annotation -> annotation.getNameAsString().equals("Test"));
                 method.addAnnotation(new MarkerAnnotationExpr("ParameterizedTest"));
                 method.setName(newTestName);
+                List<String> csvRows = new ArrayList<>(); // Get the size of the lists in the map (assumes all lists have the same size)
+                int size = parameter_to_values_map.get(1).size();
+                for (int i = 0; i < size; i++) {
+                    StringBuilder row = new StringBuilder();
+                    boolean first = true;
+                    for (ArrayList<LiteralStringValueExpr> list : parameter_to_values_map.values()) {
+                        if (!first) {
+                            row.append(", ");
+                        } else {
+                            first = false;
+                        }
+                        row.append(list.get(i).getValue()); // Extract the string value
+                    }
+                    csvRows.add(row.toString());
+                }
+
                 NormalAnnotationExpr csvSourceAnnotation = new NormalAnnotationExpr();
-//                List<String> csvRows = IntStream.range(0, parameter_to_values_map.get(1).size())
-//                        .mapToObj(i -> parameter_to_values_map.values().stream()
-//                                .map(list -> list.get(i))
-//                                .collect(Collectors.joining(", ")))
-//                        .collect(Collectors.toList());
-
-                List<String> csvRows = IntStream.range(0, parameter_to_values_map.get(1).size())
-                        .mapToObj(i -> parameter_to_values_map.values().stream()
-                                .map(list -> list.get(i).getValue()) // Extract the string value
-                                .collect(Collectors.joining(", ")))
-                        .collect(Collectors.toList());
-
-                String csvSourceValues = csvRows.stream()
-                        .collect(Collectors.joining("\", \"", "\"", "\""));
                 csvSourceAnnotation.setName("CsvSource");
-                csvSourceAnnotation.addPair("value", "{" + csvSourceValues + "}");
+
+                // Properly indent each value set
+                StringBuilder csvBuilder = new StringBuilder();
+                csvBuilder.append("{\n");
+                for (String row : csvRows) {
+                    csvBuilder.append("\t\"").append(row).append("\",\n");
+                }
+                csvBuilder.setLength(csvBuilder.length() - 2); // Remove the trailing comma and newline
+                csvBuilder.append("\n}");
+
+                // Add the formatted values to the annotation
+                csvSourceAnnotation.addPair("value", csvBuilder.toString());
                 method.addAnnotation(csvSourceAnnotation);
                 newPUTsList.add(method.clone());
             }
@@ -415,8 +482,12 @@ public class Refactor2Refresh {
                 .orElseThrow(() -> new RuntimeException("Class not found in the file"));
         ClassOrInterfaceDeclaration newClass = new ClassOrInterfaceDeclaration();
         newClass.setName(originalClass.getNameAsString() + "_Purified");
+        newClass.setPublic(true);
 
         AtomicInteger counter = new AtomicInteger(1);
+
+        Map<String, Set<String>> beforeMethodDependencies = extractBeforeMethodDependencies(originalClass);
+
         // For each test method, generate Purified tests for each assertion
         originalClass.getMethods().stream()
                 .filter(method -> method.getAnnotationByName("Test").isPresent())
@@ -433,16 +504,37 @@ public class Refactor2Refresh {
                         MethodDeclaration purifiedMethod = testMethod.clone();
                         String methodName = testMethod.getNameAsString() + "_" + counter.getAndIncrement();
                         purifiedMethod.setName(methodName);
+//
+//                        // Remove all assertions except the current one
+//                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
+//                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
+//                                call.getParentNode().ifPresent(Node::remove);
+//                            }
+//                        });
 
-                        // Remove all assertions except the current one
-                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
-                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
-                                call.getParentNode().ifPresent(Node::remove);
+                        // New code to remove statements after the current assert statement
+                        List<Statement> statements = purifiedMethod.findAll(BlockStmt.class)
+                                .get(0).getStatements(); // Assuming the first BlockStmt is the method body
+
+                        int assertIndex = -1;
+                        for (int i = 0; i < statements.size(); i++) {
+                            if (statements.get(i).findFirst(MethodCallExpr.class)
+                                    .filter(call -> call.equals(assertStatement))
+                                    .isPresent()) {
+                                assertIndex = i;
+                                break;
                             }
-                        });
+                        }
+
+                        if (assertIndex != -1) {
+                            // Remove all statements after the assert statement
+                            for (int i = statements.size() - 1; i > assertIndex; i--) {
+                                statements.get(i).remove();
+                            }
+                        }
 
                         // Perform slicing to retain only relevant statements for this assertion
-                        performSlicing(purifiedMethod, assertStatement);
+                        performSlicing(purifiedMethod, assertStatement, beforeMethodDependencies);
 
                         // Add the purified test method to the new class
                         newClass.addMember(purifiedMethod);
@@ -464,7 +556,162 @@ public class Refactor2Refresh {
         return outputFilePath;
     }
 
-    private static void performSlicing(MethodDeclaration method, MethodCallExpr assertion) {
+    public static Set<String> expandVariablesUsingBeforeDependencies(Set<String> variables, Map<String, Set<String>> beforeMethodDependencies) {
+        Set<String> expandedVariables = new HashSet<>(variables);
+        for (String var : variables) {
+            // If the variable has dependencies in beforeMethodDependencies, add those
+            for (Map.Entry<String, Set<String>> dependency : beforeMethodDependencies.entrySet()) {
+                // If the current variable is a dependent of any key in beforeMethodDependencies
+                if (dependency.getValue().contains(var)) {
+                    expandedVariables.add(dependency.getKey());
+                }
+            }
+        }
+        return expandedVariables;
+    }
+
+    private static void performSlicing(MethodDeclaration method, MethodCallExpr assertion, Map<String, Set<String>> beforeMethodDependencies) {
+        // Collect variables used in the assertion
+        Set<String> requiredVariables = getVariablesUsedInAssertion(assertion);
+
+        // Track method calls on required objects
+        Set<String> requiredObjectMethodCalls = new HashSet<>();
+
+        // Identify method calls on required objects in the assertion
+        findObjectMethodCalls(assertion, requiredVariables, requiredObjectMethodCalls);
+
+        // Expand required variables based on beforeMethodDependencies
+        Set<String> expandedRequiredVariables = expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies);
+
+        // Iterate over statements in reverse order to determine which ones to keep
+        List<Statement> statements = method.getBody().orElseThrow().getStatements();
+        for (int i = statements.size() - 1; i >= 0; i--) {
+            Statement stmt = statements.get(i);
+
+            // Check if the statement is an expression statement
+            if (stmt.isExpressionStmt()) {
+                ExpressionStmt exprStmt = stmt.asExpressionStmt();
+                Expression expr = exprStmt.getExpression();
+
+                // Check if the statement involves a method call on a required object
+                if (expr.isMethodCallExpr()) {
+                    MethodCallExpr methodCallExpr = expr.asMethodCallExpr();
+
+                    // Collect all method call expressions in the current expression and its children
+                    List<MethodCallExpr> methodCallExprs = methodCallExpr.findAll(MethodCallExpr.class);
+
+                    // Check if any of the method calls have a scope in requiredObjectMethodCalls
+                    boolean isRelevant = methodCallExprs.stream()
+                            .map(call -> call.getScope().map(Object::toString).orElse(""))
+                            .anyMatch(scopeAsString -> requiredObjectMethodCalls.contains(scopeAsString));
+
+                    // If any method call is on a required object or uses a required variable
+                    if (isRelevant || containsRequiredVariable(methodCallExpr, expandedRequiredVariables)) {
+                        // Add all variables used in the method call and expand dependencies
+                        expandedRequiredVariables.addAll(getVariablesUsedInExpression(methodCallExpr));
+                        expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
+                    } else {
+                        // Remove the statement if not related to required variables
+                        stmt.remove();
+                        continue;
+                    }
+                }
+
+                // If the expression is an assignment, check the variable it defines
+                if (expr.isAssignExpr()) {
+                    AssignExpr assignExpr = expr.asAssignExpr();
+                    String varName = assignExpr.getTarget().toString();
+
+                    // Retain the statement if it defines a required variable, and add new dependencies
+                    if (expandedRequiredVariables.contains(varName)) {
+                        expandedRequiredVariables.addAll(getVariablesUsedInExpression(assignExpr.getValue()));
+                        expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
+                    } else {
+                        // Remove the statement if it doesn't define a required variable
+                        stmt.remove();
+                    }
+                } else if (expr.isVariableDeclarationExpr()) {
+                    // Handle variable declarations
+                    expr.asVariableDeclarationExpr().getVariables().forEach(var -> {
+                        String varName = var.getNameAsString();
+
+                        // Retain the statement if it defines a required variable, and add new dependencies
+                        if (expandedRequiredVariables.contains(varName)) {
+                            var.getInitializer().ifPresent(initializer ->
+                                    expandedRequiredVariables.addAll(getVariablesUsedInExpression(initializer))
+                            );
+                            expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
+                        } else {
+                            // Remove the statement if it doesn't define a required variable
+                            stmt.remove();
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    // Helper method to find method calls on required objects
+    private static void findObjectMethodCalls(
+            Expression expr,
+            Set<String> requiredVariables,
+            Set<String> requiredObjectMethodCalls
+    ) {
+        // Recursively find method calls on required objects
+        if (expr.isMethodCallExpr()) {
+            MethodCallExpr methodCallExpr = expr.asMethodCallExpr();
+
+            // Check the scope of the method call
+            methodCallExpr.getScope().ifPresent(scope -> {
+                String scopeAsString = scope.toString();
+
+                // If the scope is a required variable, add it to tracked method calls
+                if (requiredVariables.contains(scopeAsString)) {
+                    requiredObjectMethodCalls.add(scopeAsString);
+                }
+            });
+
+            // Recursively check arguments
+            methodCallExpr.getArguments().forEach(arg ->
+                    findObjectMethodCalls(arg, requiredVariables, requiredObjectMethodCalls)
+            );
+        }
+        // Recursively check other expression types
+        else if (expr.isEnclosedExpr()) {
+            findObjectMethodCalls(expr.asEnclosedExpr().getInner(), requiredVariables, requiredObjectMethodCalls);
+        }
+    }
+
+    // Helper method to check if an expression contains any required variables
+    private static boolean containsRequiredVariable(
+            Expression expr,
+            Set<String> requiredVariables
+    ) {
+        if (expr == null) return false;
+
+        // Check method call expressions
+        if (expr.isMethodCallExpr()) {
+            MethodCallExpr methodCallExpr = expr.asMethodCallExpr();
+
+            // Check scope
+            if (methodCallExpr.getScope().map(s -> requiredVariables.contains(s.toString())).orElse(false)) {
+                return true;
+            }
+
+            // Check arguments
+            return methodCallExpr.getArguments().stream()
+                    .anyMatch(arg -> containsRequiredVariable(arg, requiredVariables));
+        }
+
+        // Check if the expression itself is a required variable
+        if (expr.isNameExpr()) {
+            return requiredVariables.contains(expr.toString());
+        }
+
+        return false;
+    }
+
+    private static void performSlicingOld(MethodDeclaration method, MethodCallExpr assertion) {
         // Collect variables used in the assertion
         Set<String> requiredVariables = getVariablesUsedInAssertion(assertion);
 
@@ -528,10 +775,18 @@ public class Refactor2Refresh {
         for (int i = 0; i < purifiedTestsOfOriginalTest.size(); i++) {
             MethodDeclaration test1 = purifiedTestsOfOriginalTest.get(i);
             List<String> test1Lines = extractNonAssertionLines(test1);
+            List<String> test1Assertions = extractAssertionLines(test1);
 
             for (int j = i + 1; j < purifiedTestsOfOriginalTest.size(); j++) {
                 MethodDeclaration test2 = purifiedTestsOfOriginalTest.get(j);
                 List<String> test2Lines = extractNonAssertionLines(test2);
+                List<String> test2Assertions = extractAssertionLines(test2);
+
+                if (!Collections.disjoint(test1Assertions, test2Assertions)) {
+//                    System.out.println("Tests are not independent due to common assertions: " +
+//                            test1.getNameAsString() + " and " + test2.getNameAsString());
+                    return false;
+                }
 
                 if (areTestsIndependent(test1Lines, test2Lines)) {
                     System.out.println("Independent tests found: " + test1.getNameAsString() + " and " + test2.getNameAsString());
@@ -555,6 +810,16 @@ public class Refactor2Refresh {
         return true; // No common line found, tests are independent
     }
 
+    // Helper method to extract assertion lines from a method
+    private static List<String> extractAssertionLines(MethodDeclaration method) {
+        List<String> assertions = new ArrayList<>();
+        method.findAll(MethodCallExpr.class).forEach(call -> {
+            if (call.getNameAsString().startsWith("assert")) {
+                assertions.add(call.toString()); // Add the assertion line to the list
+            }
+        });
+        return assertions;
+    }
     private static List<String> extractNonAssertionLines(MethodDeclaration test) {
         List<String> lines = new ArrayList<>();
         String[] bodyLines = test.getBody().toString().split("\n");
@@ -582,6 +847,119 @@ public class Refactor2Refresh {
         return true;
     }
 
+    private static Map<String, Set<String>> extractBeforeMethodDependencies(ClassOrInterfaceDeclaration testClass) {
+        // Map to store variable dependencies
+        // Key: Variable name
+        // Value: Set of variables that depend on this variable
+        Map<String, Set<String>> variableDependencies = new HashMap<>();
+
+        // Find all @Before methods
+        List<MethodDeclaration> beforeMethods = testClass.getMethods().stream()
+                .filter(method -> method.getAnnotationByName("Before").isPresent())
+                .collect(Collectors.toList());
+
+        beforeMethods.forEach(beforeMethod -> {
+            // Track variables used and modified in the method
+            Map<String, Set<String>> localVariableDependencies = new HashMap<>();
+
+            // Find all variable declarations and assignments
+            beforeMethod.findAll(VariableDeclarator.class).forEach(var -> {
+                String varName = var.getNameAsString();
+
+                // Find variables used in the initialization
+                var.getInitializer().ifPresent(initializer -> {
+                    Set<String> usedVariables = findUsedVariables(initializer);
+
+                    // Update dependencies
+                    updateDependencyMap(localVariableDependencies, varName, usedVariables);
+                });
+            });
+
+            // Find method calls and assignments
+            beforeMethod.findAll(MethodCallExpr.class).forEach(methodCall -> {
+                // Check method calls that modify variables
+                methodCall.getScope().ifPresent(scope -> {
+                    String scopeStr = scope.toString();
+
+                    // Find variables used in method call arguments
+                    Set<String> argumentVariables = methodCall.getArguments().stream()
+                            .flatMap(arg -> findUsedVariables(arg).stream())
+                            .collect(Collectors.toSet());
+
+                    updateDependencyMap(localVariableDependencies, scopeStr, argumentVariables);
+                });
+            });
+
+            // Find assignments
+            beforeMethod.findAll(AssignExpr.class).forEach(assignExpr -> {
+                String targetVar = assignExpr.getTarget().toString();
+                Set<String> usedVariables = findUsedVariables(assignExpr.getValue());
+
+                updateDependencyMap(localVariableDependencies, targetVar, usedVariables);
+            });
+
+            // Merge local dependencies into global map
+            localVariableDependencies.forEach((key, dependencies) ->
+                    variableDependencies.merge(key, dependencies, (existing, newDeps) -> {
+                        existing.addAll(newDeps);
+                        return existing;
+                    })
+            );
+        });
+
+        return variableDependencies;
+    }
+
+    private static Set<String> findUsedVariables(Expression expr) {
+        Set<String> usedVariables = new HashSet<>();
+
+        // Recursively find variable names in the expression
+        if (expr == null) return usedVariables;
+
+        // Check method call expressions
+        if (expr.isMethodCallExpr()) {
+            MethodCallExpr methodCallExpr = expr.asMethodCallExpr();
+
+            // Add scope variable if exists
+            methodCallExpr.getScope().ifPresent(scope -> {
+                if (scope.isNameExpr()) {
+                    usedVariables.add(scope.toString());
+                }
+            });
+
+            // Add variables from arguments
+            methodCallExpr.getArguments().forEach(arg ->
+                    usedVariables.addAll(findUsedVariables(arg))
+            );
+        }
+        // Check name expressions
+        else if (expr.isNameExpr()) {
+            usedVariables.add(expr.toString());
+        }
+        // Check for object creation expressions
+        else if (expr.isObjectCreationExpr()) {
+            ObjectCreationExpr objCreation = expr.asObjectCreationExpr();
+            objCreation.getArguments().forEach(arg ->
+                    usedVariables.addAll(findUsedVariables(arg))
+            );
+        }
+
+        return usedVariables;
+    }
+
+    // Helper method to update dependency map
+    private static void updateDependencyMap(
+            Map<String, Set<String>> dependencyMap,
+            String targetVariable,
+            Set<String> usedVariables
+    ) {
+        // Initialize the set for target variable if not exists
+        dependencyMap.putIfAbsent(targetVariable, new HashSet<>());
+
+        // Add all used variables as dependencies
+        dependencyMap.get(targetVariable).addAll(usedVariables);
+    }
+
     private static TestFileResult identifyAssertionPastas(String inputFilePath) throws IOException {
         System.out.println("Identifying assertion pastas in file: " + inputFilePath);
         System.out.println("\n Test Method : Status");
@@ -593,6 +971,9 @@ public class Refactor2Refresh {
                 .orElseThrow(() -> new RuntimeException("Class not found in the file"));
         AtomicInteger totalTests = new AtomicInteger();
         AtomicInteger AssertionPastaCount = new AtomicInteger();
+
+        // Extract @Before method dependencies
+        Map<String, Set<String>> beforeMethodDependencies = extractBeforeMethodDependencies(originalClass);
 
         // For each test method, generate purified tests for each assertion
         originalClass.getMethods().stream()
@@ -614,17 +995,35 @@ public class Refactor2Refresh {
                         String methodName = testMethod.getNameAsString() + "_" + counter.getAndIncrement();
                         purifiedMethod.setName(methodName);
 
-                        // Remove all assertions except the current one
-                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
-                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
-                                call.getParentNode().ifPresent(Node::remove);
-                            }
-                        });
+//                        // Remove all assertions except the current one
+//                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
+//                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
+//                                call.getParentNode().ifPresent(Node::remove);
+//                            }
+//                        });
 
-                        // Perform slicing to retain only relevant statements for this assertion
-                        performSlicing(purifiedMethod, assertStatement);
-//                        DynamicSlicingAnalyzer.performDynamicSlicing(purifiedMethod, assertStatement);
-//                        DynamicSlicer.performDynamicSlicing(purifiedMethod, assertStatement);
+                        // New code to remove statements after the current assert statement
+                        List<Statement> statements = purifiedMethod.findAll(BlockStmt.class)
+                                .get(0).getStatements(); // Assuming the first BlockStmt is the method body
+
+                        int assertIndex = -1;
+                        for (int i = 0; i < statements.size(); i++) {
+                            if (statements.get(i).findFirst(MethodCallExpr.class)
+                                    .filter(call -> call.equals(assertStatement))
+                                    .isPresent()) {
+                                assertIndex = i;
+                                break;
+                            }
+                        }
+
+                        if (assertIndex != -1) {
+                            // Remove all statements after the assert statement
+                            for (int i = statements.size() - 1; i > assertIndex; i--) {
+                                statements.get(i).remove();
+                            }
+                        }
+
+                        performSlicing(purifiedMethod, assertStatement, beforeMethodDependencies);
 
                         // Add the purified test method to the list
                         purifiedTestsOfOriginalTest.add(purifiedMethod);
@@ -648,7 +1047,7 @@ public class Refactor2Refresh {
         String fileName = Paths.get(filePath).getFileName().toString();
         // Check if it's a Java file and starts with "Test"
         return fileName.endsWith(".java") &&
-                fileName.startsWith("Test") &&
+                fileName.contains("Test") &&
                 !filePath.contains("/target/") && // Exclude compiled files
                 !filePath.contains("/build/");    // Exclude build directories
     }
@@ -753,6 +1152,51 @@ public class Refactor2Refresh {
                 });
         generateReport(results, pathToJavaRepository);
     }
+
+    public static String filterTestMethod(String testClassPath, String testMethodName) throws IOException {
+        // Parse the provided Java test class
+        CompilationUnit compilationUnit = StaticJavaParser.parse(new File(testClassPath));
+
+        // Extract the test class
+        ClassOrInterfaceDeclaration testClass = compilationUnit
+                .getClassByName(Paths.get(testClassPath).getFileName().toString().replace(".java", ""))
+                .orElseThrow(() -> new IllegalArgumentException("Test class not found"));
+
+        // Create a modifiable copy of methods
+        List<MethodDeclaration> methods = new ArrayList<>(testClass.getMethods());
+
+        // Remove unwanted methods
+        for (MethodDeclaration method : methods) {
+            if (!isNeededMethod(method, testMethodName)) {
+                testClass.getMembers().remove(method); // Remove from class
+            }
+        }
+
+        // Create the new test class file
+        String newTestClassName = testClass.getNameAsString() + testMethodName;
+        testClass.setName(newTestClassName);
+        String newFileName = newTestClassName + ".java";
+
+        Path newFilePath = Paths.get(new File(testClassPath).getParent(), newFileName);
+        try (FileWriter writer = new FileWriter(newFilePath.toFile())) {
+            writer.write(compilationUnit.toString());
+        }
+
+        return newFilePath.toString();
+    }
+
+    private static boolean isNeededMethod(MethodDeclaration method, String testMethodName) {
+        // Check if the method is the target test method
+        if (method.getNameAsString().equals(testMethodName)) {
+            return true;
+        }
+
+        // Check for annotations like @Before, @BeforeAll, @After, @AfterAll
+        return method.getAnnotations().stream()
+                .map(annotation -> annotation.getName().asString())
+                .anyMatch(annotation -> annotation.equals("Before") || annotation.equals("BeforeAll")
+                        || annotation.equals("After") || annotation.equals("AfterAll"));
+    }
     public static void main(String[] args) throws IOException {
         if (args.length < 2) {
             throw new IllegalArgumentException("Please provide the path to the input file as an argument.");
@@ -760,12 +1204,29 @@ public class Refactor2Refresh {
         String inputFile = args[0];
         String operation = args[1];
         if(operation.equals("detect")) {
-//             identifyAssertionPastas(inputFile);
             detectAssertionPastaAndGenerateReport(inputFile);
 //            TestCoverageGenerator.generateCoverage(inputFile);
         }
         else if (operation.equals("detectin")) {
             identifyAssertionPastas(inputFile);
+        }
+        else if (operation.equals("fixin")) {
+            if(args.length < 3) {
+                throw new IllegalArgumentException("Please provide the method name to fix as an argument.");
+            }
+            String method = args[2];
+            String filteredTestFilePath = filterTestMethod(inputFile, method);
+            System.out.println("Filtered test file created: " + filteredTestFilePath);
+            String purifiedTestsFile = createPurifiedTestFile(filteredTestFilePath);
+            System.out.println( "Purified test file created: " + purifiedTestsFile);
+
+            CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedTestsFile);
+            List<String> listTestMethods = extractMethodListFromCU(cu);
+            HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
+            List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
+            List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
+            String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs);
+            createGPTEnhancedTestFile(putsFile, newPUTs);
         }
         else if(operation.equals("fix")) {
             String purifiedTestsFile = createPurifiedTestFile(inputFile);
@@ -781,7 +1242,7 @@ public class Refactor2Refresh {
 
             List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
             String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs);
-            createGPTEnhancedTestFile(putsFile, newPUTs);
+//            createGPTEnhancedTestFile(putsFile, newPUTs);
             // ToDo: Add logic to merge separate PUTs into a single PUT
             // ToDo: Experiment on hadoop old dataset test files
             // Later: Quality check -> [runnable] [same or more coverage]
