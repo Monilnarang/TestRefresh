@@ -14,7 +14,6 @@ import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.*;
 import com.github.javaparser.ast.stmt.BlockStmt;
-import com.github.javaparser.ast.type.Type;
 import com.google.googlejavaformat.java.Formatter;
 import com.google.googlejavaformat.java.FormatterException;
 import com.github.javaparser.ast.stmt.ExpressionStmt;
@@ -28,9 +27,11 @@ import dev.langchain4j.model.openai.OpenAiChatModel;
 import java.io.*;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 public class Refactor2Refresh {
+
+    public static int TotalRedundantTests = 0;
+    public static int TotalNewPuts = 0;
     // Parameterizer
     protected static final File DEFAULT_OUTPUT_DIR = new File("./z-out-retrofit/");
     private static File outputDir = DEFAULT_OUTPUT_DIR;
@@ -109,22 +110,38 @@ public class Refactor2Refresh {
         }
     }
 
-    static List<String> extractMethodListFromCU(CompilationUnit cu) {
-        // Generate list of all test method name
+    static List<String> extractTestMethodListFromCU(CompilationUnit cu) {
         List<String> testMethodNames = new ArrayList<>();
-        // assuming single test class
+        int testCounter = 0;
+
         for(int i=0;i<cu.getChildNodes().size();i++) {
             if (cu.getChildNodes().get(i) instanceof ClassOrInterfaceDeclaration) {
                 ClassOrInterfaceDeclaration clazz = (ClassOrInterfaceDeclaration) cu.getChildNodes().get(i);
+
                 for( int j=0;j<clazz.getChildNodes().size();j++) {
                     if (clazz.getChildNodes().get(j) instanceof MethodDeclaration) {
                         MethodDeclaration method = (MethodDeclaration) clazz.getChildNodes().get(j);
-                        System.out.println("Test method found: " + method.getNameAsString());
-                        testMethodNames.add(method.getNameAsString());
+
+                        // Check if the method has @Test annotation
+                        boolean isTestMethod = method.getAnnotations().stream()
+                                .map(AnnotationExpr::getNameAsString)
+                                .anyMatch(annotationName -> annotationName.equals("Test"));
+
+                        // Check if the method is marked with @Ignore, @Disabled, or similar annotations
+                        boolean isSkipped = method.getAnnotations().stream()
+                                .map(AnnotationExpr::getNameAsString)
+                                .anyMatch(annotationName -> annotationName.equals("Ignore") || annotationName.equals("Disabled"));
+
+                        if (isTestMethod && !isSkipped) {
+    //                      System.out.println("Test method found: " + method.getNameAsString());
+                            testCounter++;
+                            testMethodNames.add(method.getNameAsString());
+                        }
                     }
                 }
             }
         }
+        System.out.println("Total test methods found: " + testCounter);
         return testMethodNames;
     }
 
@@ -252,7 +269,8 @@ public class Refactor2Refresh {
             }
             TreeMap<Integer, ArrayList<LiteralStringValueExpr>> parameter_to_values_map = new TreeMap<Integer, ArrayList<LiteralStringValueExpr>>();
             String firstTestName = group.get(0).Name;
-            String newTestName = generateParameterizedTestName(group);
+//            String newTestName = generateParameterizedTestName(group); // use this for Assertion Pasta
+            String newTestName = firstTestName + "_Parameterized";
             for( UnitTest unitTest : group) {
                 HashMap<String, SlicingUtils.Variable> variableMap = new HashMap<String, SlicingUtils.Variable>();
                 HashMap<String, Integer> hardcodedMap = new HashMap<String, Integer>();
@@ -294,7 +312,13 @@ public class Refactor2Refresh {
                         } else {
                             first = false;
                         }
-                        row.append(list.get(i).getValue()); // Extract the string value
+                        try {
+                            row.append(list.get(i).getValue()); // Extract the string value
+                        } catch (Exception e) {
+                            System.out.println(e.getCause());
+                            throw new RuntimeException("Error extracting value from LiteralStringValueExpr");
+                        }
+
                     }
                     csvRows.add(row.toString());
                 }
@@ -425,7 +449,7 @@ public class Refactor2Refresh {
         }
     }
 
-    public static String createParameterizedTestFile(String originalFilePath, List<MethodDeclaration> newMethods) throws IOException {
+    public static String createParameterizedTestFile(String originalFilePath, List<MethodDeclaration> newMethods, List<String> excludedMethods) throws IOException {
         // Load the original file
         File originalFile = new File(originalFilePath);
         FileInputStream inputStream = new FileInputStream(originalFile);
@@ -434,24 +458,30 @@ public class Refactor2Refresh {
         // Add these lines right after parsing the original file
         compilationUnit.addImport("org.junit.jupiter.params.ParameterizedTest");
         compilationUnit.addImport("org.junit.jupiter.params.provider.CsvSource");
-        // Remove the regular Test import manually
-        compilationUnit.getImports().removeIf(importDecl ->
-                importDecl.getNameAsString().equals("org.junit.jupiter.api.Test")
-        );
+
+//        // Remove the regular Test import manually -> enable this for Assertion Pasta
+//        compilationUnit.getImports().removeIf(importDecl ->
+//                importDecl.getNameAsString().equals("org.junit.jupiter.api.Test")
+//        );
 
         // Find the first class declaration in the file (assuming it's a single class per file)
         ClassOrInterfaceDeclaration originalClass = compilationUnit.getClassByName(originalFile.getName().replace(".java", ""))
                 .orElseThrow(() -> new IllegalArgumentException("No class found in the file."));
 
         // Create a new class name with the suffix "Parameterized"
-        String newClassName = originalClass.getNameAsString().replace("Purified", "Parameterized");
+//        String newClassName = originalClass.getNameAsString().replace("Purified", "Parameterized"); // use this for Assertion Pasta
+        String newClassName = originalClass.getNameAsString() + "_Parameterized";
 
         // Clone the original class to preserve all other details (fields, imports, etc.)
         ClassOrInterfaceDeclaration newClass = originalClass.clone();
         newClass.setName(newClassName);  // Rename the class with the "Parameterized" suffix
 
-        // Remove all existing methods in the new class
-        newClass.getMethods().forEach(newClass::remove);
+        // Remove all existing methods in the new class -> use this for Assertion Pasta instead of below
+//        newClass.getMethods().forEach(newClass::remove);
+
+        newClass.getMethods().stream()
+                .filter(method -> excludedMethods.contains(method.getNameAsString()))
+                .forEach(newClass::remove);
 
         // Add the new methods
         newMethods.forEach(newClass::addMember);
@@ -461,7 +491,8 @@ public class Refactor2Refresh {
         compilationUnit.addType(newClass);  // Add the new class
 
         // Define the new file path with "Parameterized" suffix
-        String newFileName = originalFile.getName().replace("Purified.java", "Parameterized.java");
+//        String newFileName = originalFile.getName().replace("Purified.java", "Parameterized.java"); // use this for Assertion Pasta
+        String newFileName = originalFile.getName().replace(".java", "_Parameterized.java");
         Path newFilePath = Paths.get(originalFile.getParent(), newFileName);
 
         // Write the updated CompilationUnit to the new file
@@ -570,6 +601,28 @@ public class Refactor2Refresh {
         return expandedVariables;
     }
 
+    public static boolean checkMethodExpressionsAndRequiredObjects(MethodCallExpr methodCallExpr, Set<String> requiredObjectMethodCalls) {
+        List<MethodCallExpr> methodCallExprs = methodCallExpr.findAll(MethodCallExpr.class);
+        boolean isRelevant = methodCallExprs.stream()
+                .map(call -> call.getScope().map(Object::toString).orElse(""))
+                .anyMatch(scopeAsString -> requiredObjectMethodCalls.contains(scopeAsString));
+        if (isRelevant || containsRequiredVariable(methodCallExpr, requiredObjectMethodCalls)) {
+            return true;
+        }
+        for(MethodCallExpr call : methodCallExprs) {
+            if (call.getScope().isPresent()) {
+                if (requiredObjectMethodCalls.contains(call.getScope().get().toString())) {
+                    return true;
+                }
+            }
+            if(containsRequiredVariable(call, requiredObjectMethodCalls)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static void performSlicing(MethodDeclaration method, MethodCallExpr assertion, Map<String, Set<String>> beforeMethodDependencies) {
         // Collect variables used in the assertion
         Set<String> requiredVariables = getVariablesUsedInAssertion(assertion);
@@ -597,16 +650,11 @@ public class Refactor2Refresh {
                 if (expr.isMethodCallExpr()) {
                     MethodCallExpr methodCallExpr = expr.asMethodCallExpr();
 
-                    // Collect all method call expressions in the current expression and its children
-                    List<MethodCallExpr> methodCallExprs = methodCallExpr.findAll(MethodCallExpr.class);
-
-                    // Check if any of the method calls have a scope in requiredObjectMethodCalls
-                    boolean isRelevant = methodCallExprs.stream()
-                            .map(call -> call.getScope().map(Object::toString).orElse(""))
-                            .anyMatch(scopeAsString -> requiredObjectMethodCalls.contains(scopeAsString));
-
                     // If any method call is on a required object or uses a required variable
-                    if (isRelevant || containsRequiredVariable(methodCallExpr, expandedRequiredVariables)) {
+                    if(methodCallExpr.equals(assertion)) {
+                        continue;
+                    }
+                    else if (checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls)) {
                         // Add all variables used in the method call and expand dependencies
                         expandedRequiredVariables.addAll(getVariablesUsedInExpression(methodCallExpr));
                         expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
@@ -622,11 +670,25 @@ public class Refactor2Refresh {
                     AssignExpr assignExpr = expr.asAssignExpr();
                     String varName = assignExpr.getTarget().toString();
 
+                    // Fetch all method call expressions within the assignment expression
+                    List<MethodCallExpr> methodCallExprs = assignExpr.findAll(MethodCallExpr.class);
+
+                    boolean anyMethodRelevant = methodCallExprs.stream()
+                            .anyMatch(methodCallExpr -> checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls));
+
                     // Retain the statement if it defines a required variable, and add new dependencies
                     if (expandedRequiredVariables.contains(varName)) {
                         expandedRequiredVariables.addAll(getVariablesUsedInExpression(assignExpr.getValue()));
                         expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
-                    } else {
+                    } else  if (anyMethodRelevant) {
+                        // Perform the required actions if any method call is relevant
+                        expandedRequiredVariables.addAll(getVariablesUsedInExpression(assignExpr.getValue()));
+                        methodCallExprs.forEach(methodCallExpr -> {
+                            expandedRequiredVariables.addAll(getVariablesUsedInExpression(methodCallExpr));
+                        });
+                        expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
+                    }
+                    else {
                         // Remove the statement if it doesn't define a required variable
                         stmt.remove();
                     }
@@ -635,14 +697,26 @@ public class Refactor2Refresh {
                     expr.asVariableDeclarationExpr().getVariables().forEach(var -> {
                         String varName = var.getNameAsString();
 
+
+                        // Check if the initializer contains any relevant method calls
+                        boolean anyMethodRelevant = var.getInitializer()
+                                .map(initializer -> initializer.findAll(MethodCallExpr.class).stream()
+                                        .anyMatch(methodCallExpr -> checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls)))
+                                .orElse(false);
+
                         // Retain the statement if it defines a required variable, and add new dependencies
-                        if (expandedRequiredVariables.contains(varName)) {
-                            var.getInitializer().ifPresent(initializer ->
-                                    expandedRequiredVariables.addAll(getVariablesUsedInExpression(initializer))
-                            );
+                        if (expandedRequiredVariables.contains(varName) || anyMethodRelevant) {
+                            var.getInitializer().ifPresent(initializer -> {
+                                expandedRequiredVariables.addAll(getVariablesUsedInExpression(initializer));
+
+                                // Add variables from all method calls within the initializer
+                                initializer.findAll(MethodCallExpr.class).forEach(methodCallExpr ->
+                                        expandedRequiredVariables.addAll(getVariablesUsedInExpression(methodCallExpr))
+                                );
+                            });
                             expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
                         } else {
-                            // Remove the statement if it doesn't define a required variable
+                            // Remove the statement if it doesn't define a required variable or contain relevant method calls
                             stmt.remove();
                         }
                     });
@@ -699,8 +773,11 @@ public class Refactor2Refresh {
             }
 
             // Check arguments
-            return methodCallExpr.getArguments().stream()
-                    .anyMatch(arg -> containsRequiredVariable(arg, requiredVariables));
+            Set<String> variablesInMethodCall = getVariablesUsedInExpression(methodCallExpr);
+            return variablesInMethodCall.stream()
+                    .anyMatch(requiredVariables::contains);
+//            return methodCallExpr.getArguments().stream()
+//                    .anyMatch(arg -> containsRequiredVariable(arg, requiredVariables));
         }
 
         // Check if the expression itself is a required variable
@@ -1079,7 +1156,7 @@ public class Refactor2Refresh {
         }
     }
 
-    private static void generateReport(List<TestFileResult> results, String repositoryPath) {
+    private static void generateReportAssertionPasta(List<TestFileResult> results, String repositoryPath) {
         try {
             String reportPath = Paths.get(repositoryPath, "assertion_pasta_report.md").toString();
             try (PrintWriter writer = new PrintWriter(new FileWriter(reportPath))) {
@@ -1150,9 +1227,54 @@ public class Refactor2Refresh {
                         e.printStackTrace();
                     }
                 });
-        generateReport(results, pathToJavaRepository);
+        generateReportAssertionPasta(results, pathToJavaRepository);
     }
 
+    public static void detectSimilarTestsInRepoAndGenerateReport(String pathToJavaRepository) throws IOException {
+        List<TestFileResult> results = new ArrayList<>();
+        AtomicInteger count = new AtomicInteger();
+
+        // Find all Java test files in the repository
+        Files.walk(Paths.get(pathToJavaRepository))
+                .filter(Files::isRegularFile)
+                .filter(path -> isTestFile(path.toString()))
+                .forEach(path -> {
+                    try {
+                        count.getAndIncrement();
+                        System.out.println("Processing Class No: " + count);
+                        System.out.println(path);
+                        detectSimilarTestsInFile(path.toString());
+                    } catch (Exception e) {
+                        System.err.println("Error processing file: " + path);
+                        e.printStackTrace();
+                    }
+                });
+
+    }
+    public static List<List<UnitTest>> detectSimilarTestsInFile(String inputFile) throws FileNotFoundException {
+        // todo don't include methods which aren't Tests (no @Test)
+        CompilationUnit cu = configureJavaParserAndGetCompilationUnit(inputFile);
+        List<String> listTestMethods = extractTestMethodListFromCU(cu);
+        HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
+        List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
+        System.out.println("Confirming Total tests: " + listTestMethods.size());
+        int redundantTests = listTestMethods.size() - similarTestGroups.size();
+        System.out.println("Redundant Tests: " + redundantTests);
+        TotalRedundantTests = TotalRedundantTests + redundantTests;
+        System.out.println("Total similar test groups: " + similarTestGroups.size());
+        for (List<UnitTest> group : similarTestGroups) {
+            System.out.println("Group Size: " + group.size());
+            if (group.size() > 1) {
+                TotalNewPuts = TotalNewPuts + 1;
+            }
+            for (UnitTest test : group) {
+                System.out.println(test.Name);
+            }
+            System.out.println("====================================");
+        }
+        System.out.println("============================================================================================================");
+        return similarTestGroups;
+    }
     public static String filterTestMethod(String testClassPath, String testMethodName) throws IOException {
         // Parse the provided Java test class
         CompilationUnit compilationUnit = StaticJavaParser.parse(new File(testClassPath));
@@ -1197,6 +1319,19 @@ public class Refactor2Refresh {
                 .anyMatch(annotation -> annotation.equals("Before") || annotation.equals("BeforeAll")
                         || annotation.equals("After") || annotation.equals("AfterAll"));
     }
+
+    public static List<String> extractTestMethodsToExclude(List<List<UnitTest>> similarTests) {
+        List<String> excludedTests = new ArrayList<>();
+        for (List<UnitTest> group : similarTests) {
+            if (group.size() > 1) {
+                for (int i = 0; i < group.size(); i++) {
+                    excludedTests.add(group.get(i).Name);
+                }
+            }
+        }
+        return excludedTests;
+    }
+
     public static void main(String[] args) throws IOException {
         if (args.length < 2) {
             throw new IllegalArgumentException("Please provide the path to the input file as an argument.");
@@ -1221,28 +1356,42 @@ public class Refactor2Refresh {
             System.out.println( "Purified test file created: " + purifiedTestsFile);
 
             CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedTestsFile);
-            List<String> listTestMethods = extractMethodListFromCU(cu);
+            List<String> listTestMethods = extractTestMethodListFromCU(cu);
             HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
             List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
             List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
-            String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs);
+            String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs, new ArrayList<>());
             createGPTEnhancedTestFile(putsFile, newPUTs);
-        }
-        else if(operation.equals("fix")) {
+        } else if(operation.equals("detectSimilarIn")) {
+            detectSimilarTestsInFile(inputFile);
+        } else if(operation.equals("detectSimilar")) {
+            detectSimilarTestsInRepoAndGenerateReport(inputFile);
+            System.out.println("Total Redundant Tests: " + TotalRedundantTests);
+            System.out.println("Total New PUTs: " + TotalNewPuts);
+        } else if(operation.equals("retrofitIn")) {
+            CompilationUnit cu = configureJavaParserAndGetCompilationUnit(inputFile);
+            List<List<UnitTest>> similarTest = detectSimilarTestsInFile(inputFile);
+            List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTest, cu);
+            System.out.println("Total New PUTs: " + TotalNewPuts);
+            String putsFile = createParameterizedTestFile(inputFile, newPUTs, extractTestMethodsToExclude(similarTest));
+            System.out.println("Parameterized test file created: " + putsFile);
+        } else if(operation.equals("retrofit")) {
+
+        } else if(operation.equals("fix")) {
             String purifiedTestsFile = createPurifiedTestFile(inputFile);
             System.out.println( "Purified test file created: " + purifiedTestsFile);
 
             CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedTestsFile);
             // Later Quality check -> [runnable] [same coverage]
-            List<String> listTestMethods = extractMethodListFromCU(cu);
+            List<String> listTestMethods = extractTestMethodListFromCU(cu);
             HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
             List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
             // ToDo : Impl logic to merge similar tests together
             // create map: similarTestGroups - > lists of params for each group
 
             List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
-            String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs);
-//            createGPTEnhancedTestFile(putsFile, newPUTs);
+            String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs, new ArrayList<>());
+            createGPTEnhancedTestFile(putsFile, newPUTs);
             // ToDo: Add logic to merge separate PUTs into a single PUT
             // ToDo: Experiment on hadoop old dataset test files
             // Later: Quality check -> [runnable] [same or more coverage]

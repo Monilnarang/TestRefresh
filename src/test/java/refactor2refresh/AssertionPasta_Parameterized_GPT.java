@@ -11,31 +11,16 @@ public class AssertionPasta_Parameterized_GPT {
       value = {
         "5, 6, 11",
         "16, 15, 31",
-        "0, 0, 0",
-        "-1, 1, 0",
-        "Integer.MAX_VALUE, 1, Integer.MIN_VALUE",
-        "Integer.MIN_VALUE, -1, Integer.MAX_VALUE",
-        "-5, -5, -10"
+        "0, 0, 0", // Edge case: both parameters are zero
+        "-1, -1, -2", // Edge case: both parameters are negative
+        "1, -1, 0", // Edge case: one positive and one negative number
+        "Integer.MAX_VALUE, 1, Integer.MIN_VALUE", // Edge case: overflow
+        "Integer.MIN_VALUE, -1, Integer.MAX_VALUE" // Edge case: underflow
       })
-  public void parameterisedTest_test1_1_test1_2_(int param1, int param2, int param3) {
+  public void test1_1to2(int param1, int param2, int param3) {
     int a = param1;
     int b = param2;
     int expectedAB = param3;
     assertEquals(expectedAB, a + b);
-  }
-
-  @ParameterizedTest
-  @CsvSource(
-      value = {
-        "5, 6, 11",
-        "0, 0, 0", // Edge case: adding two zeros
-        "-5, 5, 0", // Edge case: zero sum with negative and positive
-        "Integer.MAX_VALUE, 1, Integer.MIN_VALUE", // Edge case: overflow
-        "Integer.MIN_VALUE, -1, Integer.MAX_VALUE" // Edge case: underflow
-      })
-  public void parameterisedTest_test1_3_(int param1, int param2, int param3) {
-    int a = param1;
-    int b = param2;
-    assertEquals(param3, a + b);
   }
 }
