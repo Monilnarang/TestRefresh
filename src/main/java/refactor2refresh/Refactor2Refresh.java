@@ -3,17 +3,21 @@ package refactor2refresh;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.*;
+
 import java.util.concurrent.atomic.AtomicInteger;
-import com.github.javaparser.StaticJavaParser;
+
 import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.Modifier;
+import com.github.javaparser.ast.body.*;
+import com.github.javaparser.ast.expr.LambdaExpr;
+import com.github.javaparser.ast.stmt.*;
+import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.Node;
 import com.github.javaparser.ast.NodeList;
-import com.github.javaparser.ast.body.BodyDeclaration;
-import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
-import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.*;
 import com.github.javaparser.ast.stmt.BlockStmt;
+import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.google.googlejavaformat.java.Formatter;
 import com.google.googlejavaformat.java.FormatterException;
 import com.github.javaparser.ast.stmt.ExpressionStmt;
@@ -88,7 +92,7 @@ public class Refactor2Refresh {
     }
 
     static boolean areTestsSimilarEnoughToBeRetrofitted(NodeList<Node> statementNodes1, NodeList<Node> statementNodes2) {
-        TreeMap<Integer, ArrayList<LiteralStringValueExpr>> paramWiseValueSets = new TreeMap<Integer, ArrayList<LiteralStringValueExpr>>();
+        TreeMap<Integer, ArrayList<LiteralExpr>> paramWiseValueSets = new TreeMap<Integer, ArrayList<LiteralExpr>>();
 
         HashMap<String, SlicingUtils.Variable> variableMap1 = new HashMap<String, SlicingUtils.Variable>();
         HashMap<String, SlicingUtils.Variable> variableMap2 = new HashMap<String, SlicingUtils.Variable>();
@@ -245,7 +249,7 @@ public class Refactor2Refresh {
         return baseName + "_" + rangeBuilder.toString();
     }
 
-    private static Class<?> inferType(LiteralStringValueExpr expr) {
+    private static Class<?> inferType(LiteralExpr expr) {
         if (expr instanceof IntegerLiteralExpr) {
             return int.class;
         } else if (expr instanceof DoubleLiteralExpr) {
@@ -256,22 +260,100 @@ public class Refactor2Refresh {
             return char.class;
         } else if (expr instanceof StringLiteralExpr) {
             return String.class;
-        } else {
+        } else if (expr instanceof BooleanLiteralExpr) {
+            return boolean.class;
+        }else {
             // Fallback for unsupported or custom literal types
             throw new IllegalArgumentException("Unsupported literal type: " + expr.getClass().getSimpleName());
         }
     }
+
+    public static String getLiteralValue(LiteralExpr literalExpr) {
+        if (literalExpr instanceof BooleanLiteralExpr) {
+            return String.valueOf(((BooleanLiteralExpr) literalExpr).getValue());
+        } else if (literalExpr instanceof StringLiteralExpr) {
+            return ((StringLiteralExpr) literalExpr).getValue();
+        } else if (literalExpr instanceof IntegerLiteralExpr) {
+            return ((IntegerLiteralExpr) literalExpr).getValue();
+        } else if (literalExpr instanceof DoubleLiteralExpr) {
+            return ((DoubleLiteralExpr) literalExpr).getValue();
+        } else if (literalExpr instanceof CharLiteralExpr) {
+            return ((CharLiteralExpr) literalExpr).getValue();
+        } else if (literalExpr instanceof NullLiteralExpr) {
+            return "null";
+        } else if (literalExpr instanceof LongLiteralExpr) {
+            return ((LongLiteralExpr) literalExpr).getValue();
+        } else {
+            throw new IllegalArgumentException("Unsupported LiteralExpr type: " + literalExpr.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Creates a provider method for the parameterized test
+     */
+    private static MethodDeclaration createProviderMethod(String methodName, TreeMap<Integer, ArrayList<LiteralExpr>> parameter_to_values_map) {
+        // Create the provider method declaration
+        MethodDeclaration providerMethod = new MethodDeclaration();
+        providerMethod.setName(methodName);
+        providerMethod.setType(new ClassOrInterfaceType()
+                .setName("Stream")
+                .setTypeArguments(new ClassOrInterfaceType().setName("Arguments")));
+        providerMethod.setModifiers(Modifier.Keyword.STATIC, Modifier.Keyword.PUBLIC);
+
+        // Create static import statements if necessary
+        // These would need to be added to the CompilationUnit separately
+        // cu.addImport("org.junit.jupiter.params.provider.Arguments");
+        // cu.addImport("java.util.stream.Stream");
+        // cu.addImport("static org.junit.jupiter.params.provider.Arguments.arguments");
+
+        // Build the method body
+        BlockStmt body = new BlockStmt();
+
+        // Create the return statement with Stream.of(...)
+        MethodCallExpr streamOfCall = new MethodCallExpr();
+        streamOfCall.setName("of");
+        streamOfCall.setScope(new NameExpr("Stream"));
+
+        // Get the parameter count and data size
+        int parameterCount = parameter_to_values_map.size();
+        int dataSize = parameter_to_values_map.get(1).size();  // Assuming at least one parameter exists
+
+        // For each test case, create an arguments() call
+        for (int i = 0; i < dataSize; i++) {
+            MethodCallExpr argumentsCall = new MethodCallExpr();
+            argumentsCall.setName("arguments");
+
+            // Add all parameters for this test case
+            for (int j = 1; j <= parameterCount; j++) {
+                ArrayList<LiteralExpr> values = parameter_to_values_map.get(j);
+                LiteralExpr value = values.get(i);
+                argumentsCall.addArgument(value.clone());  // Clone to avoid modifying original
+            }
+
+            streamOfCall.addArgument(argumentsCall);
+        }
+
+        // Add the return statement to the method body
+        body.addStatement(new ReturnStmt(streamOfCall));
+        providerMethod.setBody(body);
+
+        // Add annotations if needed (e.g., @Test would not be appropriate here)
+        return providerMethod;
+    }
+
     static List<MethodDeclaration> retrofitSimilarTestsTogether(List<List<UnitTest>> similarTestGroups, CompilationUnit cu) {
         List<MethodDeclaration> newPUTsList = new ArrayList<>();
         for( List<UnitTest> group : similarTestGroups) {
             if(group.size() < 2) {
                 continue;
             }
-            TreeMap<Integer, ArrayList<LiteralStringValueExpr>> parameter_to_values_map = new TreeMap<Integer, ArrayList<LiteralStringValueExpr>>();
+            TreeMap<Integer, ArrayList<LiteralExpr>> parameter_to_values_map = new TreeMap<Integer, ArrayList<LiteralExpr>>();
             String firstTestName = group.get(0).Name;
-//            String newTestName = generateParameterizedTestName(group); // use this for Assertion Pasta
-            String newTestName = firstTestName + "_Parameterized";
+            String newTestName = generateParameterizedTestName(group); // use this for Assertion Pasta
+//            String newTestName = firstTestName + "_Parameterized";
+            System.out.println("Group tests: ");
             for( UnitTest unitTest : group) {
+                System.out.println("Test Name: " + unitTest.Name);
                 HashMap<String, SlicingUtils.Variable> variableMap = new HashMap<String, SlicingUtils.Variable>();
                 HashMap<String, Integer> hardcodedMap = new HashMap<String, Integer>();
                 ArrayList<TrieLikeNode> trie = SlicingUtils.createTrieFromStatementsNew(unitTest.Statements, hardcodedMap, parameter_to_values_map);
@@ -285,14 +367,14 @@ public class Refactor2Refresh {
 
                 // add parameters : replace hardcoded and add in signature
                 for (int i = 0; i < parameter_to_values_map.size(); i++) {
-                    ArrayList<LiteralStringValueExpr> values = parameter_to_values_map.get(i + 1); // TreeMap keys start from 1 in this example
+                    ArrayList<LiteralExpr> values = parameter_to_values_map.get(i + 1); // TreeMap keys start from 1 in this example
                     if (values != null && !values.isEmpty()) {
-                        LiteralStringValueExpr initialValue = values.get(0);
+                        LiteralExpr initialValue = values.get(0);
                         String parameterName = "param" + (i + 1);
                         Class<?> parameterType = inferType(initialValue);
                         method.addParameter(parameterType, parameterName);
-                        method.findAll(LiteralStringValueExpr.class).forEach(literalExpr -> {
-                            if (literalExpr.getValue().equals(initialValue.getValue())) {
+                        method.findAll(LiteralExpr.class).forEach(literalExpr -> {
+                            if (getLiteralValue(literalExpr).equals(getLiteralValue(initialValue))) {
                                 literalExpr.replace(new NameExpr(parameterName));
                             }
                         });
@@ -301,22 +383,37 @@ public class Refactor2Refresh {
                 method.getAnnotations().removeIf(annotation -> annotation.getNameAsString().equals("Test"));
                 method.addAnnotation(new MarkerAnnotationExpr("ParameterizedTest"));
                 method.setName(newTestName);
+
+                // Create the MethodSource annotation
+                String methodSourceName = newTestName + "Provider";
+                SingleMemberAnnotationExpr methodSourceAnnotation = new SingleMemberAnnotationExpr();
+                methodSourceAnnotation.setName("MethodSource");
+                methodSourceAnnotation.setMemberValue(new StringLiteralExpr(methodSourceName));
+                method.addAnnotation(methodSourceAnnotation);
+
+                // Create the provider method that will supply test parameters
+                MethodDeclaration providerMethod = createProviderMethod(methodSourceName, parameter_to_values_map);
+
+
+                /*
                 List<String> csvRows = new ArrayList<>(); // Get the size of the lists in the map (assumes all lists have the same size)
                 int size = parameter_to_values_map.get(1).size();
                 for (int i = 0; i < size; i++) {
                     StringBuilder row = new StringBuilder();
                     boolean first = true;
-                    for (ArrayList<LiteralStringValueExpr> list : parameter_to_values_map.values()) {
+                    for (ArrayList<LiteralExpr> list : parameter_to_values_map.values()) {
                         if (!first) {
                             row.append(", ");
                         } else {
                             first = false;
                         }
                         try {
-                            row.append(list.get(i).getValue()); // Extract the string value
+                            row.append(getLiteralValue(list.get(i))); // Extract the string value
                         } catch (Exception e) {
                             System.out.println(e.getCause());
-                            throw new RuntimeException("Error extracting value from LiteralStringValueExpr");
+                            System.out.println(e.getMessage());
+                            System.out.println("Error extracting value from LiteralStringValueExpr");
+//                            throw new RuntimeException("Error extracting value from LiteralStringValueExpr");
                         }
 
                     }
@@ -338,7 +435,9 @@ public class Refactor2Refresh {
                 // Add the formatted values to the annotation
                 csvSourceAnnotation.addPair("value", csvBuilder.toString());
                 method.addAnnotation(csvSourceAnnotation);
+                */
                 newPUTsList.add(method.clone());
+                newPUTsList.add(providerMethod);
             }
         }
         return newPUTsList;
@@ -457,9 +556,13 @@ public class Refactor2Refresh {
 
         // Add these lines right after parsing the original file
         compilationUnit.addImport("org.junit.jupiter.params.ParameterizedTest");
-        compilationUnit.addImport("org.junit.jupiter.params.provider.CsvSource");
+        compilationUnit.addImport("org.junit.jupiter.params.provider.MethodSource");
+        compilationUnit.addImport("org.junit.jupiter.params.provider.Arguments");
+        compilationUnit.addImport("java.util.stream.Stream");
+        compilationUnit.addImport("static org.junit.jupiter.params.provider.Arguments.arguments");
+//        compilationUnit.addImport("org.junit.jupiter.params.provider.CsvSource");
 
-//        // Remove the regular Test import manually -> enable this for Assertion Pasta
+        // Remove the regular Test import manually -> enable this for Assertion Pasta
 //        compilationUnit.getImports().removeIf(importDecl ->
 //                importDecl.getNameAsString().equals("org.junit.jupiter.api.Test")
 //        );
@@ -469,8 +572,8 @@ public class Refactor2Refresh {
                 .orElseThrow(() -> new IllegalArgumentException("No class found in the file."));
 
         // Create a new class name with the suffix "Parameterized"
-//        String newClassName = originalClass.getNameAsString().replace("Purified", "Parameterized"); // use this for Assertion Pasta
-        String newClassName = originalClass.getNameAsString() + "_Parameterized";
+        String newClassName = originalClass.getNameAsString().replace("Purified", "Parameterized"); // use this for Assertion Pasta
+//        String newClassName = originalClass.getNameAsString() + "_Parameterized";
 
         // Clone the original class to preserve all other details (fields, imports, etc.)
         ClassOrInterfaceDeclaration newClass = originalClass.clone();
@@ -479,6 +582,8 @@ public class Refactor2Refresh {
         // Remove all existing methods in the new class -> use this for Assertion Pasta instead of below
 //        newClass.getMethods().forEach(newClass::remove);
 
+        // Remove the excluded methods from the new class
+        // todo update for assertion pasta only?
         newClass.getMethods().stream()
                 .filter(method -> excludedMethods.contains(method.getNameAsString()))
                 .forEach(newClass::remove);
@@ -491,8 +596,8 @@ public class Refactor2Refresh {
         compilationUnit.addType(newClass);  // Add the new class
 
         // Define the new file path with "Parameterized" suffix
-//        String newFileName = originalFile.getName().replace("Purified.java", "Parameterized.java"); // use this for Assertion Pasta
-        String newFileName = originalFile.getName().replace(".java", "_Parameterized.java");
+        String newFileName = originalFile.getName().replace("Purified.java", "Parameterized.java"); // use this for Assertion Pasta
+//        String newFileName = originalFile.getName().replace(".java", "_Parameterized.java");
         Path newFilePath = Paths.get(originalFile.getParent(), newFileName);
 
         // Write the updated CompilationUnit to the new file
@@ -624,6 +729,8 @@ public class Refactor2Refresh {
     }
 
     private static void performSlicing(MethodDeclaration method, MethodCallExpr assertion, Map<String, Set<String>> beforeMethodDependencies) {
+        // input method is an atomized test, with only one assertion and all the lines after it removed
+
         // Collect variables used in the assertion
         Set<String> requiredVariables = getVariablesUsedInAssertion(assertion);
 
@@ -866,7 +973,7 @@ public class Refactor2Refresh {
                 }
 
                 if (areTestsIndependent(test1Lines, test2Lines)) {
-                    System.out.println("Independent tests found: " + test1.getNameAsString() + " and " + test2.getNameAsString());
+//                    System.out.println("Independent tests found: " + test1.getNameAsString() + " and " + test2.getNameAsString());
                     return true; // Found two independent tests
                 }
             }
@@ -885,6 +992,21 @@ public class Refactor2Refresh {
             }
         }
         return true; // No common line found, tests are independent
+    }
+
+    public static List<String> extractAllLines2(MethodDeclaration test) {
+        List<String> lines = new ArrayList<>();
+        String[] bodyLines = test.getBody().toString().split("\n");
+        for (String line : bodyLines) {
+            line = line.trim();
+            if (!line.startsWith("//") && !line.isEmpty()) {
+                lines.add(line);
+            }
+        }
+        // remove the first and last lines which are { and }
+        lines.remove(0);
+        lines.remove(lines.size() - 1);
+        return lines;
     }
 
     // Helper method to extract assertion lines from a method
@@ -1037,26 +1159,408 @@ public class Refactor2Refresh {
         dependencyMap.get(targetVariable).addAll(usedVariables);
     }
 
+    public static List<List<MethodDeclaration>> findTestGroups(List<MethodDeclaration> purifiedTestsOfOriginalTest) {
+        int n = purifiedTestsOfOriginalTest.size();
+        UnionFind uf = new UnionFind(n);
+
+        // Compare each pair of tests
+        for (int i = 0; i < n; i++) {
+            MethodDeclaration test1 = purifiedTestsOfOriginalTest.get(i);
+            List<String> test1Lines = extractNonAssertionLines(test1);
+
+            for (int j = i + 1; j < n; j++) {
+                MethodDeclaration test2 = purifiedTestsOfOriginalTest.get(j);
+                List<String> test2Lines = extractNonAssertionLines(test2);
+
+                // If tests are not independent, union them
+                if (!areTestsIndependent(test1Lines, test2Lines)) {
+                    uf.union(i, j);
+                }
+            }
+        }
+
+        // Convert index groups to test groups
+        List<List<Integer>> indexGroups = uf.getAllGroups();
+        List<List<MethodDeclaration>> testGroups = new ArrayList<>();
+
+        for (List<Integer> group : indexGroups) {
+            List<MethodDeclaration> testGroup = group.stream()
+                    .map(purifiedTestsOfOriginalTest::get)
+                    .collect(Collectors.toList());
+            testGroups.add(testGroup);
+        }
+
+        return testGroups;
+    }
+
+    public static int countSeparableComponents(List<MethodDeclaration> purifiedTestsOfOriginalTest) {
+        int n = purifiedTestsOfOriginalTest.size();
+        UnionFind uf = new UnionFind(n);
+
+        // Compare each pair of tests
+        for (int i = 0; i < n; i++) {
+            MethodDeclaration test1 = purifiedTestsOfOriginalTest.get(i);
+            List<String> test1Lines = extractNonAssertionLines(test1);
+
+            for (int j = i + 1; j < n; j++) {
+                MethodDeclaration test2 = purifiedTestsOfOriginalTest.get(j);
+                List<String> test2Lines = extractNonAssertionLines(test2);
+
+                // If tests are not independent, union them
+                if (!areTestsIndependent(test1Lines, test2Lines)) {
+                    uf.union(i, j);
+                }
+            }
+        }
+
+        // Return the number of disjoint sets
+        return uf.getSetCount();
+    }
+
+    // Union-Find (Disjoint Set Union) data structure
+    private static class UnionFind {
+        private int[] parent;
+        private int[] rank;
+        private int setCount;
+
+        public UnionFind(int size) {
+            parent = new int[size];
+            rank = new int[size];
+            setCount = size; // Initially, each element is its own set
+
+            for (int i = 0; i < size; i++) {
+                parent[i] = i; // Each element is its own parent
+                rank[i] = 1;   // Initial rank is 1
+            }
+        }
+
+        // Find the root of the set containing `x`
+        public int find(int x) {
+            if (parent[x] != x) {
+                parent[x] = find(parent[x]); // Path compression
+            }
+            return parent[x];
+        }
+
+        // Union two sets
+        public void union(int x, int y) {
+            int rootX = find(x);
+            int rootY = find(y);
+
+            if (rootX != rootY) {
+                // Union by rank
+                if (rank[rootX] > rank[rootY]) {
+                    parent[rootY] = rootX;
+                } else if (rank[rootX] < rank[rootY]) {
+                    parent[rootX] = rootY;
+                } else {
+                    parent[rootY] = rootX;
+                    rank[rootX]++;
+                }
+                setCount--; // Decrease the number of sets
+            }
+        }
+
+        // Get the number of disjoint sets
+        public int getSetCount() {
+            return setCount;
+        }
+
+        public List<List<Integer>> getAllGroups() {
+            Map<Integer, List<Integer>> groups = new HashMap<>();
+
+            // Group elements by their root
+            for (int i = 0; i < parent.length; i++) {
+                int root = find(i);
+                groups.computeIfAbsent(root, k -> new ArrayList<>()).add(i);
+            }
+
+            return new ArrayList<>(groups.values());
+        }
+    }
+
+    private static boolean isWhenMethodInChain(Expression expr) {
+        if (!(expr instanceof MethodCallExpr)) {
+            return false;
+        }
+
+        MethodCallExpr methodCall = (MethodCallExpr) expr;
+
+        // If this is the "when" method, we found it
+        if (methodCall.getNameAsString().equals("when")) {
+            return true;
+        }
+
+        // Otherwise, check parent in the chain if it exists
+        if (methodCall.getScope().isPresent()) {
+            return isWhenMethodInChain(methodCall.getScope().get());
+        }
+
+        return false;
+    }
+
+    public static boolean hasComplexControlStructures(MethodDeclaration method) {
+        try {
+
+            // Check for Mockito-style mocking with when().thenReturn() pattern
+            for (MethodCallExpr methodCall : method.findAll(MethodCallExpr.class)) {
+                // Look for method calls that might be part of the chain
+                if (methodCall.getNameAsString().equals("thenReturn") ||
+                        methodCall.getNameAsString().equals("thenThrow") ||
+                        methodCall.getNameAsString().equals("thenAnswer")) {
+
+                    // Check if this is part of a method chain with "when"
+                    if (methodCall.getScope().isPresent() &&
+                            methodCall.getScope().get() instanceof MethodCallExpr) {
+
+                        MethodCallExpr parentCall = (MethodCallExpr) methodCall.getScope().get();
+                        // If the parent or any ancestor in the chain is "when", it's a mocking statement
+                        if (isWhenMethodInChain(parentCall)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // Check for inner classes or anonymous classes with @Override
+            if (!method.findAll(ObjectCreationExpr.class).isEmpty()) {
+                for (ObjectCreationExpr objCreation : method.findAll(ObjectCreationExpr.class)) {
+                    // Check if it's an anonymous class with body
+                    if (objCreation.getAnonymousClassBody().isPresent()) {
+                        // Check if any method in the anonymous class has @Override
+                        for (BodyDeclaration<?> member : objCreation.getAnonymousClassBody().get()) {
+                            if (member.isMethodDeclaration()) {
+                                MethodDeclaration innerMethod = (MethodDeclaration) member;
+                                if (innerMethod.getAnnotations().stream()
+                                        .anyMatch(a -> a.getNameAsString().equals("Override"))) {
+                                    return true; // Found @Override in an anonymous class method
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check for try-catch blocks
+            if (method.findAll(TryStmt.class).size() > 0) {
+                return true;
+            }
+
+            // Check for if-else statements
+            if (method.findAll(IfStmt.class).size() > 0) {
+                return true;
+            }
+
+            // Check for for loops
+            if (method.findAll(ForStmt.class).size() > 0 ||
+                    method.findAll(ForEachStmt.class).size() > 0) {
+                return true;
+            }
+
+            // Check for while loops
+            if (method.findAll(WhileStmt.class).size() > 0 ||
+                    method.findAll(DoStmt.class).size() > 0) {
+                return true;
+            }
+
+            // Check for lambda expressions
+            if (method.findAll(LambdaExpr.class).size() > 0) {
+                return true;
+            }
+
+            // Check for array declarations
+            if (!method.findAll(VariableDeclarationExpr.class).isEmpty()) {
+                for (VariableDeclarationExpr varDecl : method.findAll(VariableDeclarationExpr.class)) {
+                    if (varDecl.getElementType().isArrayType()) {
+                        return true; // Explicit array declaration
+                    }
+
+                    // Check if the initializer is a method call returning an array
+                    for (VariableDeclarator var : varDecl.getVariables()) {
+                        if (var.getInitializer().isPresent()) {
+                            Expression init = var.getInitializer().get();
+                            if (init instanceof MethodCallExpr) {
+                                MethodCallExpr methodCall = (MethodCallExpr) init;
+                                // A simple heuristic: checking if the name contains 'getBytes' or similar
+                                if (methodCall.getNameAsString().equals("getBytes")) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check for complex data structures like List, Set, or Map
+            List<String> complexTypes = Arrays.asList("List", "Set", "Map");
+            for (VariableDeclarationExpr varDecl : method.findAll(VariableDeclarationExpr.class)) {
+                String type = varDecl.getElementType().asString();
+                for (String complexType : complexTypes) {
+                    if (type.contains(complexType)) {
+                        return true;
+                    }
+                }
+            }
+
+            // Check for parameterized test annotations
+            if (isParameterizedTest(method)) {
+                return true;
+            }
+
+            // Check for method references (::)
+            if (!method.findAll(MethodReferenceExpr.class).isEmpty()) {
+                return true;
+            }
+
+            return false;
+        } catch (Exception e) {
+            // If parsing fails, assume the method contains complex structures
+            // System.out.println("Error while checking complex control structures: " + e.getMessage());
+            return true;
+        }
+    }
+
+    private static boolean isParameterizedTest(MethodDeclaration method) {
+        // Get all annotations on the method
+        NodeList<AnnotationExpr> annotations = method.getAnnotations();
+
+        // List of annotations that indicate parameterized tests
+        List<String> parameterizedAnnotations = Arrays.asList(
+                // JUnit 5 parameterized test annotations
+                "ParameterizedTest",
+                "ValueSource",
+                "CsvSource",
+                "MethodSource",
+                "EnumSource",
+                "ArgumentsSource",
+                "CsvFileSource",
+                // JUnit 4 parameterized test annotations
+                "Parameters",
+                "Parameter"
+        );
+
+        // Check each annotation
+        for (AnnotationExpr annotation : annotations) {
+            String annotationName = annotation.getNameAsString();
+            if (parameterizedAnnotations.contains(annotationName)) {
+                return true;
+            }
+        }
+
+        // Check method parameters for Parameter annotation (JUnit 4)
+        for (Parameter parameter : method.getParameters()) {
+            for (AnnotationExpr annotation : parameter.getAnnotations()) {
+                String annotationName = annotation.getNameAsString();
+                if (parameterizedAnnotations.contains(annotationName)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean hasMockingAnnotations(ClassOrInterfaceDeclaration classDeclaration, CompilationUnit inputCompilationUnit) {
+        // List of common mocking annotations and annotations patterns
+        List<String> mockingAnnotations = Arrays.asList(
+                "Mock", "MockBean", "Spy", "SpyBean", "InjectMocks",
+                "MockitoAnnotations", "MockK", "AutoCloseable", "RunWith");
+
+        // Check class annotations (e.g., @RunWith(MockitoJUnitRunner.class))
+        for (AnnotationExpr annotation : classDeclaration.getAnnotations()) {
+            String annotationName = annotation.getNameAsString();
+
+            // Check for RunWith with Mockito
+            if (annotationName.equals("RunWith") && annotation instanceof SingleMemberAnnotationExpr) {
+                Expression value = ((SingleMemberAnnotationExpr) annotation).getMemberValue();
+                if (value.toString().contains("Mockito")) {
+                    return true;
+                }
+            }
+
+            // Check other mock annotations
+            if (mockingAnnotations.contains(annotationName)) {
+                return true;
+            }
+        }
+
+        // Check field annotations for @Mock, @InjectMocks, etc.
+        for (FieldDeclaration field : classDeclaration.getFields()) {
+            for (AnnotationExpr annotation : field.getAnnotations()) {
+                if (mockingAnnotations.contains(annotation.getNameAsString())) {
+                    return true;
+                }
+            }
+        }
+
+        // Check for common mock initialization patterns in methods
+        for (MethodDeclaration method : classDeclaration.getMethods()) {
+            // Check for MockitoAnnotations.initMocks/openMocks calls
+            if (method.getName().asString().contains("setUp") ||
+                    method.getAnnotations().stream().anyMatch(a -> a.getNameAsString().equals("Before") ||
+                            a.getNameAsString().equals("BeforeEach"))) {
+
+                for (MethodCallExpr methodCall : method.findAll(MethodCallExpr.class)) {
+                    if (methodCall.getNameAsString().equals("initMocks") ||
+                            methodCall.getNameAsString().equals("openMocks")) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check import statements for mocking libraries
+        boolean hasMockitoImport = inputCompilationUnit.getImports().stream()
+                .anyMatch(importDecl ->
+                        importDecl.getNameAsString().contains("mockito") ||
+                                importDecl.getNameAsString().contains("mock"));
+
+        if (hasMockitoImport) {
+            return true;
+        }
+
+        return false;
+    }
+
     private static TestFileResult identifyAssertionPastas(String inputFilePath) throws IOException {
         System.out.println("Identifying assertion pastas in file: " + inputFilePath);
-        System.out.println("\n Test Method : Status");
         // Parse the input Java test file
         CompilationUnit inputCompilationUnit = StaticJavaParser.parse(new File(inputFilePath));
 
         // Get the original class and create the new class with "_Purified" suffix
         ClassOrInterfaceDeclaration originalClass = inputCompilationUnit.getClassByName(inputCompilationUnit.getType(0).getNameAsString())
                 .orElseThrow(() -> new RuntimeException("Class not found in the file"));
+        boolean containsMocking = hasMockingAnnotations(originalClass, inputCompilationUnit);
+        if (containsMocking) {
+            System.out.println("Skipping file due to mocking annotations: " + inputFilePath);
+            return null;
+        }
+
         AtomicInteger totalTests = new AtomicInteger();
+        AtomicInteger totalConsideredTests = new AtomicInteger();
         AtomicInteger AssertionPastaCount = new AtomicInteger();
 
         // Extract @Before method dependencies
         Map<String, Set<String>> beforeMethodDependencies = extractBeforeMethodDependencies(originalClass);
 
+        TestFileResult result = new TestFileResult(inputFilePath, 0, 0, 0,0.0);
+
         // For each test method, generate purified tests for each assertion
         originalClass.getMethods().stream()
                 .filter(method -> method.getAnnotationByName("Test").isPresent())
+//                .filter(method -> !hasComplexControlStructures(method)) // ToDo: Count number of tests excluded
                 .forEach(testMethod -> {
                     totalTests.getAndIncrement();
+                    if(hasComplexControlStructures(testMethod)) {
+                        return;
+                    }
+
+                    totalConsideredTests.getAndIncrement();
+                    if(hasComplexControlStructures(testMethod)) {
+
+                        return; // Skip this test method
+                    }
+
                     AtomicInteger counter = new AtomicInteger(1);
                     List<MethodDeclaration> purifiedTestsOfOriginalTest = new ArrayList<>();
                     // Collect all assert statements for backward slicing
@@ -1065,6 +1569,8 @@ public class Refactor2Refresh {
                             .filter(call -> call.getNameAsString().startsWith("assert"))
                             .collect(Collectors.toList());
 
+                    HashMap<String, NodeList<Node>> statementNodesListMap = new HashMap<>();
+
                     // Generate a separate test method for each assertion
                     assertions.forEach(assertStatement -> {
                         // Clone the original method to create an purified version
@@ -1072,12 +1578,12 @@ public class Refactor2Refresh {
                         String methodName = testMethod.getNameAsString() + "_" + counter.getAndIncrement();
                         purifiedMethod.setName(methodName);
 
-//                        // Remove all assertions except the current one
-//                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
-//                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
-//                                call.getParentNode().ifPresent(Node::remove);
-//                            }
-//                        });
+                        // Remove all assertions except the current one
+                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
+                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
+                                call.getParentNode().ifPresent(Node::remove);
+                            }
+                        });
 
                         // New code to remove statements after the current assert statement
                         List<Statement> statements = purifiedMethod.findAll(BlockStmt.class)
@@ -1104,18 +1610,40 @@ public class Refactor2Refresh {
 
                         // Add the purified test method to the list
                         purifiedTestsOfOriginalTest.add(purifiedMethod);
+                        NodeList<Node> statementsNodes = new NodeList<>();
+                        List<Statement> purifiedStatements = purifiedMethod.getBody().get().getStatements();
+                        for (int i=0;i<purifiedStatements.size();i++) {
+                            // create copy of statements.get(i) and then add that copy to statementsNodes
+                            statementsNodes.add(purifiedStatements.get(i).clone());
+                        }
+                        statementNodesListMap.put(purifiedMethod.getNameAsString(), statementsNodes);
                     });
-                    boolean hasIndependentTests = hasIndependentTests(purifiedTestsOfOriginalTest);
-                    System.out.println(testMethod.getNameAsString() + " : " + (hasIndependentTests ? "Pasta" : " Inseparable"));
-                    if (hasIndependentTests) {
+//                    boolean hasIndependentTests = hasIndependentTests(purifiedTestsOfOriginalTest); -> buggy code misses cases
+                    int separableComponents = countSeparableComponents(purifiedTestsOfOriginalTest);
+                    if (separableComponents > 1) {
+                        System.out.println(testMethod.getNameAsString() + ":");
+                        System.out.println(separableComponents + ", ");
+                        result.testMethodComponents.put(testMethod.getNameAsString(), separableComponents);
+                        try {
+                            result.listPastaTests.add(testMethod.getNameAsString());
+                        } catch (Exception e) {
+                            System.out.println("Error in adding test method to listPastaTests");
+                        }
+
                         AssertionPastaCount.getAndIncrement();
                     }
                 });
-        TestFileResult result = new TestFileResult(inputFilePath, totalTests.get(), AssertionPastaCount.get(),
-                totalTests.get() > 0 ? (AssertionPastaCount.get() * 100.0 / totalTests.get()) : 0.0);
+        result.totalTests = totalTests.get();
+        result.totalConsideredTests = totalConsideredTests.get();
+        result.pastaCount = AssertionPastaCount.get();
+        result.pastaPercentage = totalConsideredTests.get() > 0 ? (AssertionPastaCount.get() * 100.0 / totalConsideredTests.get()) : 0.0;
+
+//        TestFileResult result = new TestFileResult(inputFilePath, totalConsideredTests.get(), AssertionPastaCount.get(),
+//                totalConsideredTests.get() > 0 ? (AssertionPastaCount.get() * 100.0 / totalConsideredTests.get()) : 0.0);
         System.out.println("\n Total tests: " + totalTests.get());
+        System.out.println("Total Considered tests: " + totalConsideredTests.get());
         System.out.println("Assertion Pasta count: " + AssertionPastaCount.get());
-        System.out.println("Assertion Pasta Percentage: " + (AssertionPastaCount.get() * 100.0 / totalTests.get()) + "%");
+        System.out.println("Assertion Pasta Percentage: " + (AssertionPastaCount.get() * 100.0 / totalConsideredTests.get()) + "%");
         return result;
     }
 
@@ -1136,12 +1664,15 @@ public class Refactor2Refresh {
 
             // Extract metrics from the output
             int totalTests = 0;
+            int totalConsideredTests = 0;
             int pastaCount = 0;
             double pastaPercentage = 0.0;
 
             for (String line : lines) {
                 if (line.startsWith("Total tests:")) {
                     totalTests = Integer.parseInt(line.split(":")[1].trim());
+                } else if(line.startsWith("Total Considered tests")) {
+                    totalConsideredTests = Integer.parseInt(line.split(":")[1].trim());
                 } else if (line.startsWith("Assertion Pasta count:")) {
                     pastaCount = Integer.parseInt(line.split(":")[1].trim());
                 } else if (line.startsWith("Assertion Pasta Percentage:")) {
@@ -1149,16 +1680,21 @@ public class Refactor2Refresh {
                 }
             }
 
-            return new TestFileResult(filePath, totalTests, pastaCount, pastaPercentage);
+            return new TestFileResult(filePath, totalTests, totalConsideredTests, pastaCount, pastaPercentage);
         } catch (Exception e) {
             System.err.println("Error parsing output for file: " + filePath);
             return null;
         }
     }
 
+    public static String getLastFolderName(String repositoryPath) {
+        Path path = Paths.get(repositoryPath);
+        return path.getFileName().toString(); // Extracts the last folder name
+    }
+
     private static void generateReportAssertionPasta(List<TestFileResult> results, String repositoryPath) {
         try {
-            String reportPath = Paths.get(repositoryPath, "assertion_pasta_report.md").toString();
+            String reportPath = Paths.get("/Users/monilnarang/Documents/Research Evaluations/Apr5", getLastFolderName(repositoryPath) + ".md").toString();
             try (PrintWriter writer = new PrintWriter(new FileWriter(reportPath))) {
                 // Write report header
                 writer.println("# Assertion Pasta Analysis Report");
@@ -1169,19 +1705,43 @@ public class Refactor2Refresh {
                 // Calculate total metrics
                 int totalTestFiles = results.size();
                 int totalTests = results.stream().mapToInt(r -> r.totalTests).sum();
+                int totalConsideredTests = results.stream().mapToInt(r -> r.totalConsideredTests).sum();
                 int totalPasta = results.stream().mapToInt(r -> r.pastaCount).sum();
-                double overallPercentage = totalTests > 0 ?
-                        (totalPasta * 100.0 / totalTests) : 0.0;
+                AtomicInteger totalIndependentLogics = new AtomicInteger();
+                double overallPercentage = totalConsideredTests > 0 ?
+                        (totalPasta * 100.0 / totalConsideredTests) : 0.0;
+
+                Map<Integer, Integer> separableComponentFrequency = new HashMap<>();
+                for (TestFileResult result : results) {
+                    for (int components : result.testMethodComponents.values()) {
+                        separableComponentFrequency.put(components, separableComponentFrequency.getOrDefault(components, 0) + 1);
+                    }
+                }
 
                 writer.println("\n- Total Test Files Analyzed: " + totalTestFiles);
                 writer.println("- Total Test Methods: " + totalTests);
+                writer.println("- Total Considered Test Methods: " + totalConsideredTests);
                 writer.println("- Total Assertion Pasta Cases: " + totalPasta);
                 writer.printf("- Overall Assertion Pasta Percentage: %.2f%%\n", overallPercentage);
 
+
+                // Write separable component frequency map
+                writer.println("\n### Separable Component Frequency");
+                writer.println("| Number of Separable Components | Frequency |");
+                writer.println("|--------------------------------|-----------|");
+                separableComponentFrequency.entrySet().stream()
+                        .sorted(Map.Entry.comparingByKey())
+                        .forEach(entry -> {
+                            writer.printf("| %-30d | %-9d |\n", entry.getKey(), entry.getValue());
+                            totalIndependentLogics.addAndGet(entry.getValue() * entry.getKey());
+                        });
+
+                writer.println("- Total Independent Logics: " + totalIndependentLogics.get());
+
                 // Write detailed results table
                 writer.println("\n## Detailed Results\n");
-                writer.println("| S No. | Test File | Total Tests | Assertion Pasta Count | Assertion Pasta Percentage |");
-                writer.println("|-----|-----------|-------------|---------------------|--------------------------|");
+                writer.println("| S No. | Test File | Total Tests | Assertion Pasta Count | Assertion Pasta Percentage | Test Methods (Separable Components) |");
+                writer.println("|-----|-----------|-------------|---------------------|--------------------------|-------------------------------------|");
                 AtomicInteger count = new AtomicInteger();
                 results.stream()
                         .sorted((r1, r2) -> Double.compare(r2.pastaCount, r1.pastaCount))
@@ -1189,12 +1749,26 @@ public class Refactor2Refresh {
                             String relativePath = Paths.get(repositoryPath)
                                     .relativize(Paths.get(result.filePath))
                                     .toString();
-                            writer.printf("| %d | %s | %d | %d | %.2f%% |\n",
+                            // Format test method details
+                            StringBuilder testMethodDetails = new StringBuilder();
+                            result.testMethodComponents.forEach((methodName, components) -> {
+                                testMethodDetails.append(methodName).append(" (").append(components).append("), ");
+                            });
+
+                            // Remove the trailing comma and space if there are any test methods
+                            if (testMethodDetails.length() > 0) {
+                                testMethodDetails.setLength(testMethodDetails.length() - 2);
+                            } else {
+                                testMethodDetails.append("N/A");
+                            }
+
+                            writer.printf("| %d | %s | %d | %d | %.2f%% | %s |\n",
                                     count.incrementAndGet(),
                                     relativePath,
-                                    result.totalTests,
+                                    result.totalConsideredTests,
                                     result.pastaCount,
-                                    result.pastaPercentage);
+                                    result.pastaPercentage,
+                                    testMethodDetails.toString());
                         });
 
                 System.out.println("Report generated successfully: " + reportPath);
@@ -1204,16 +1778,14 @@ public class Refactor2Refresh {
         }
     }
 
-    public static void detectAssertionPastaAndGenerateReport(String pathToJavaRepository) throws IOException {
-        // locates and read all the test files in the path folder
-        // detects assertion pasta in each test file : use identifyAssertionPastas(inputFile);
-        // generates a report file which has a table and results. 4 columns: Test File Name, Total Tests, Assertion Pasta Count, Assertion Pasta Percentage
+    public static List<TestFileResult> getAssertionPastaResultsInRepo(String pathToJavaRepository) throws IOException {
         List<TestFileResult> results = new ArrayList<>();
 
         // Find all Java test files in the repository
         Files.walk(Paths.get(pathToJavaRepository))
                 .filter(Files::isRegularFile)
                 .filter(path -> isTestFile(path.toString()))
+                .filter(path -> !path.toString().matches(".*(_Purified|_Parameterized|_Parameterized_GPT)\\.java$"))
                 .forEach(path -> {
                     try {
                         // Process the test file
@@ -1227,6 +1799,348 @@ public class Refactor2Refresh {
                         e.printStackTrace();
                     }
                 });
+        return results;
+    }
+
+    public static ClassOrInterfaceDeclaration createNewClassWithoutTests(ClassOrInterfaceDeclaration originalClass) {
+        ClassOrInterfaceDeclaration newClass = originalClass.clone();
+        newClass.setName(originalClass.getNameAsString() + "_Purified");
+        // remove all test methods from the new class
+
+        // Get all methods in the class
+        NodeList<BodyDeclaration<?>> members = newClass.getMembers();
+        List<MethodDeclaration> methodsToRemove = new ArrayList<>();
+
+        // Identify test methods to remove
+        for (BodyDeclaration<?> member : members) {
+            if (member.isMethodDeclaration()) {
+                MethodDeclaration method = (MethodDeclaration) member;
+
+                // Check for any test-related annotations
+                if (method.getAnnotations().stream().anyMatch(annotation -> {
+                    String name = annotation.getNameAsString();
+                    return name.equals("Test") ||
+                            name.equals("ParameterizedTest") ||
+                            name.equals("ValueSource") ||
+                            name.equals("CsvSource") ||
+                            name.equals("MethodSource") ||
+                            name.equals("EnumSource") ||
+                            name.equals("ArgumentsSource") ||
+                            name.equals("CsvFileSource") ||
+                            name.equals("Parameters") ||
+                            name.equals("Parameter") ||
+                            name.equals("Theory");
+                })) {
+                    methodsToRemove.add(method);
+                }
+                // Also check for methods that start with "test"
+                else if (method.getNameAsString().toLowerCase().startsWith("test")) {
+                    methodsToRemove.add(method);
+                }
+            }
+        }
+
+        // Remove the identified test methods
+        methodsToRemove.forEach(method -> method.remove());
+        return newClass;
+    }
+
+    public static String createJavaClassFromClassDeclarationObject(ClassOrInterfaceDeclaration newClass, String filePath, CompilationUnit inputCompilationUnit) {
+        CompilationUnit outputCompilationUnit = new CompilationUnit();
+        outputCompilationUnit.setPackageDeclaration(inputCompilationUnit.getPackageDeclaration().orElse(null));
+        outputCompilationUnit.getImports().addAll(inputCompilationUnit.getImports());
+        outputCompilationUnit.addType(newClass);
+        String purifiedOutputFilePath = filePath.replace(".java", "_Purified.java");
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(purifiedOutputFilePath))) {
+            writer.write(outputCompilationUnit.toString());
+        } catch (IOException e) {
+            System.err.println("Error writing output to file: " + purifiedOutputFilePath);
+        }
+        return purifiedOutputFilePath;
+    }
+
+    static class ResultCreateNewClassFileWithSplittedTests {
+        String newClassFilePath;
+        int newSeparatedTests;
+        public ResultCreateNewClassFileWithSplittedTests(String newClassFilePath, int newSeparatedTests) {
+            this.newClassFilePath = newClassFilePath;
+            this.newSeparatedTests = newSeparatedTests;
+        }
+    }
+
+    public static ResultCreateNewClassFileWithSplittedTests createNewClassFileWithSplittedTests(TestFileResult result) throws IOException {
+        CompilationUnit inputCompilationUnit = StaticJavaParser.parse(new File(result.filePath));
+        ClassOrInterfaceDeclaration originalClass = inputCompilationUnit.getClassByName(inputCompilationUnit.getType(0).getNameAsString())
+                .orElseThrow(() -> new RuntimeException("Class not found in the file"));
+
+        ClassOrInterfaceDeclaration newClass = createNewClassWithoutTests(originalClass);
+        ResultSeparateIndependentAssertionClustersAndAddToClass resultY = separateIndependentAssertionClustersAndAddToClass(originalClass, newClass, result);
+        String newClassFilePath = createJavaClassFromClassDeclarationObject(resultY.newClass, result.filePath, inputCompilationUnit);
+        return new ResultCreateNewClassFileWithSplittedTests(newClassFilePath, resultY.newSeparatedTests);
+
+    }
+
+    static class ResultSeparateIndependentAssertionClustersAndAddToClass {
+        ClassOrInterfaceDeclaration newClass;
+        int newSeparatedTests;
+
+        public ResultSeparateIndependentAssertionClustersAndAddToClass(ClassOrInterfaceDeclaration newClass, int newSeparatedTests) {
+            this.newClass = newClass;
+            this.newSeparatedTests = newSeparatedTests;
+        }
+    }
+
+    public static ResultSeparateIndependentAssertionClustersAndAddToClass separateIndependentAssertionClustersAndAddToClass(ClassOrInterfaceDeclaration originalClass, ClassOrInterfaceDeclaration newClass, TestFileResult result) {
+        // separate independent assertion clusters from the original class and add to new class
+        AtomicInteger newSeparatedTests = new AtomicInteger();
+        Map<String, Set<String>> beforeMethodDependencies = extractBeforeMethodDependencies(originalClass);
+
+        originalClass.getMethods().stream()
+                .filter(method -> method.getAnnotationByName("Test").isPresent())
+                .filter(method -> result.listPastaTests.contains(method.getNameAsString()))
+                .forEach(testMethod -> {
+                    AtomicInteger counter = new AtomicInteger(1);
+                    List<MethodDeclaration> purifiedTestsOfOriginalTest = new ArrayList<>();
+                    // Collect all assert statements for backward slicing
+                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
+                            .stream()
+                            .filter(call -> call.getNameAsString().startsWith("assert"))
+                            .collect(Collectors.toList());
+
+                    HashMap<String, NodeList<Node>> statementNodesListMap = new HashMap<>();
+
+                    // Generate a separate test method for each assertion
+                    assertions.forEach(assertStatement -> {
+                        // Clone the original method to create an purified version
+                        MethodDeclaration purifiedMethod = testMethod.clone();
+                        String methodName = testMethod.getNameAsString() + "_" + counter.getAndIncrement();
+                        purifiedMethod.setName(methodName);
+
+                        // Remove all assertions except the current one
+                        purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
+                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
+                                call.getParentNode().ifPresent(Node::remove);
+                            }
+                        });
+
+                        // New code to remove statements after the current assert statement
+                        List<Statement> statements = purifiedMethod.findAll(BlockStmt.class)
+                                .get(0).getStatements(); // Assuming the first BlockStmt is the method body
+
+                        int assertIndex = -1;
+                        for (int i = 0; i < statements.size(); i++) {
+                            if (statements.get(i).findFirst(MethodCallExpr.class)
+                                    .filter(call -> call.equals(assertStatement))
+                                    .isPresent()) {
+                                assertIndex = i;
+                                break;
+                            }
+                        }
+
+                        if (assertIndex != -1) {
+                            // Remove all statements after the assert statement
+                            for (int i = statements.size() - 1; i > assertIndex; i--) {
+                                statements.get(i).remove();
+                            }
+                        }
+
+                        performSlicing(purifiedMethod, assertStatement, beforeMethodDependencies);
+                        purifiedTestsOfOriginalTest.add(purifiedMethod);
+
+                        // Add the purified-> Separated test method to the new class
+//                        newClass.addMember(purifiedMethod);
+                    });
+                    List<MethodDeclaration> clusteredTests = clusterDependentPurifiedTests(purifiedTestsOfOriginalTest, testMethod);
+                    newSeparatedTests.addAndGet(clusteredTests.size());
+                    clusteredTests.forEach(newClass::addMember);
+                });
+        return new ResultSeparateIndependentAssertionClustersAndAddToClass(newClass, newSeparatedTests.get());
+    }
+
+    public static List<MethodDeclaration> clusterDependentPurifiedTests(List<MethodDeclaration> purifiedTestsOfOriginalTest, MethodDeclaration originalTest) {
+        List<List<MethodDeclaration>> dependentPurifiedTestGroups = findTestGroups(purifiedTestsOfOriginalTest);
+        if(dependentPurifiedTestGroups.size() <= 1) {
+            throw new RuntimeException("Error in separating independent assertion clusters, expected separable components > 1");
+        }
+
+        List<MethodDeclaration> clusteredTests = new ArrayList<>();
+
+        // Get original test lines to maintain ordering
+        List<String> originalTestLines = extractAllLines2(originalTest);
+
+        // Process each group of dependent tests
+        int num = 0;
+        for (List<MethodDeclaration> group : dependentPurifiedTestGroups) {
+            num++;
+            // Skip empty groups
+            if (group.isEmpty()) continue;
+
+            if (group.size() == 1) {
+                clusteredTests.add(group.get(0).clone());
+                continue;
+            }
+
+            // Create a new merged test for this group
+            MethodDeclaration mergedTest = new MethodDeclaration();
+            mergedTest.setName(new SimpleName(group.get(0).getNameAsString() + "_testMerged_" + num));
+            mergedTest.setAnnotations(originalTest.getAnnotations());
+            mergedTest.setModifiers(originalTest.getModifiers());
+            mergedTest.setType(originalTest.getType());
+            mergedTest.setThrownExceptions(originalTest.getThrownExceptions());
+
+            Set<String> uniqueLines = new LinkedHashSet<>(); // Use LinkedHashSet to maintain insertion order
+
+            // First pass: collect all unique lines and assertions
+            for (MethodDeclaration test : group) {
+                List<String> testLines = extractAllLines2(test);
+                uniqueLines.addAll(testLines);
+            }
+
+            // Sort unique lines based on their appearance in original test
+            List<String> sortedUniqueLines = uniqueLines.stream()
+                    .sorted((line1, line2) -> {
+                        int index1 = originalTestLines.indexOf(line1);
+                        int index2 = originalTestLines.indexOf(line2);
+                        return Integer.compare(index1, index2);
+                    })
+                    .collect(Collectors.toList());
+
+            // Combine sorted lines and assertions
+            List<String> mergedLines = new ArrayList<>();
+            mergedLines.addAll(sortedUniqueLines);
+
+            // Update the merged test's body
+            updateTestBody(mergedTest, mergedLines);
+            clusteredTests.add(mergedTest);
+        }
+
+        return clusteredTests;
+    }
+
+    // Helper method to extract all lines from a test method
+    private static List<String> extractAllLines(MethodDeclaration test) {
+        List<String> lines = new ArrayList<>();
+        // Implementation depends on how your test methods are structured
+        // You'll need to extract both assertion and non-assertion lines
+        lines.addAll(extractNonAssertionLines(test));
+        lines.addAll(extractAssertionLines(test));
+        return lines;
+    }
+
+    // Helper method to update the body of a test method
+    private static void updateTestBody(MethodDeclaration test, List<String> newLines) {
+        // Implementation depends on your AST manipulation library
+        // This should replace the existing body with the new lines
+        BlockStmt newBody = new BlockStmt();
+        for (String line : newLines) {
+            // Convert each line to a statement and add to the block
+            // The exact implementation will depend on your parsing library
+            try {
+                Statement stmt = parseStatement(line);
+                newBody.addStatement(stmt);
+            } catch (Exception e) {
+                System.out.println("Error parsing statement: " + line);
+            }
+
+        }
+        test.setBody(newBody);
+    }
+
+    // Helper method to parse a string into a statement
+    private static Statement parseStatement(String line) {
+        // Implementation depends on your parsing library
+        // This should convert a string into an AST Statement node
+        return StaticJavaParser.parseStatement(line);
+    }
+
+    private static int countPotentialPutsInSimilarTestGroups(List<List<UnitTest>> similarTestGroups) {
+        int count = 0;
+        for (List<UnitTest> group : similarTestGroups) {
+            if (group.size() > 1) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    static class ResultCreateRefreshedTestFilesInSandbox {
+        int totalNewSeparatedTestsCreated;
+        int totalNewPUTsCreated;
+        int totalPotentialPuts;
+
+        public ResultCreateRefreshedTestFilesInSandbox(int totalNewSeparatedTestsCreated, int totalNewPUTsCreated, int totalPotentialPuts) {
+            this.totalNewSeparatedTestsCreated = totalNewSeparatedTestsCreated;
+            this.totalNewPUTsCreated = totalNewPUTsCreated;
+            this.totalPotentialPuts = totalPotentialPuts;
+        }
+
+    }
+    public static ResultCreateRefreshedTestFilesInSandbox createRefreshedTestFilesInSandbox(List<TestFileResult> results) throws IOException {
+        int totalNewSeparatedTestsCreated = 0;
+        int totalNewPUTsCreated = 0;
+        int totalPotentialPuts = 0;
+        for (TestFileResult testClassResult : results) {
+            if(testClassResult.pastaCount == 0) {
+                continue;
+            }
+            // todo change the logic to create new file independent assertion cluster separated tests instead of purified => Check if done!
+            ResultCreateNewClassFileWithSplittedTests resultx = createNewClassFileWithSplittedTests(testClassResult);
+            String purifiedOutputFilePath = resultx.newClassFilePath;
+            totalNewSeparatedTestsCreated += resultx.newSeparatedTests;
+            // Purified file has separated tests of only the pasta tests from the original file.
+            // Should also have others? I think it's fine.
+
+            // PHASE II
+            // Replace all the type 2 clones with their respective PUT
+            CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedOutputFilePath);
+            List<String> listTestMethods = extractTestMethodListFromCU(cu); // all purified tests
+            HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
+            // type 2 clone detection
+            List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
+            int potentialPUTs = countPotentialPutsInSimilarTestGroups(similarTestGroups);
+            totalPotentialPuts = totalPotentialPuts + potentialPUTs;
+            System.out.println("Potential PUTs: " + potentialPUTs);
+            if(potentialPUTs == 0) {
+                System.out.println("No potential PUTs for file: " + purifiedOutputFilePath);
+                continue;
+            }
+
+            List<MethodDeclaration> newPUTs = new ArrayList<>();
+            try {
+                newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
+            } catch (Exception e) {
+                System.out.println("Error Creating PUTs");
+            }
+
+            if(newPUTs.size() == 0) {
+                System.out.println("ERROR?: Puts should be created: " + purifiedOutputFilePath);
+            }
+            else {
+                System.out.println(newPUTs.size() + " new PUTs created for file: " + purifiedOutputFilePath);
+                totalNewPUTsCreated = totalNewPUTsCreated + newPUTs.size()/2;
+                createParameterizedTestFile(purifiedOutputFilePath, newPUTs, extractTestMethodsToExclude(similarTestGroups));
+            }
+        }
+//        System.out.println("Total potential PUTs: " + totalPotentialPuts);
+//        System.out.println("Total new separated tests created: " + totalNewSeparatedTestsCreated);
+        return new ResultCreateRefreshedTestFilesInSandbox(totalNewSeparatedTestsCreated, totalNewPUTsCreated, totalPotentialPuts);
+    }
+
+    public static void fixAssertionPastaInRepo(String pathToJavaRepository) throws IOException {
+        List<TestFileResult> results = getAssertionPastaResultsInRepo(pathToJavaRepository);
+        // for each results in a file
+        // create file with only pastas and todo: add all of top code
+        ResultCreateRefreshedTestFilesInSandbox result = createRefreshedTestFilesInSandbox(results);
+        System.out.println("Total new separated tests created: " + result.totalNewSeparatedTestsCreated);
+        System.out.println("Total potential PUTs: " + result.totalPotentialPuts);
+        System.out.println("Total new PUTs created: " + result.totalNewPUTsCreated);
+    }
+
+    public static void detectAssertionPastaAndGenerateReport(String pathToJavaRepository) throws IOException {
+        // locates and read all the test files in the path folder
+        // detects assertion pasta in each test file : use identifyAssertionPastas(inputFile);
+        // generates a report file which has a table and results. 4 columns: Test File Name, Total Tests, Assertion Pasta Count, Assertion Pasta Percentage
+        List<TestFileResult> results = getAssertionPastaResultsInRepo(pathToJavaRepository);
         generateReportAssertionPasta(results, pathToJavaRepository);
     }
 
@@ -1340,10 +2254,17 @@ public class Refactor2Refresh {
         String operation = args[1];
         if(operation.equals("detect")) {
             detectAssertionPastaAndGenerateReport(inputFile);
-//            TestCoverageGenerator.generateCoverage(inputFile);
+        } else if (operation.equals("allRepos")) {
+            String[] inputFiles = inputFile.split(","); // Split the comma-separated paths
+            for (String file : inputFiles) {
+                detectAssertionPastaAndGenerateReport(file.trim()); // Trim spaces to avoid errors
+            }
         }
         else if (operation.equals("detectin")) {
             identifyAssertionPastas(inputFile);
+        }
+        else if (operation.equals("fixInRepo")) {
+            fixAssertionPastaInRepo(inputFile);
         }
         else if (operation.equals("fixin")) {
             if(args.length < 3) {
@@ -1362,13 +2283,13 @@ public class Refactor2Refresh {
             List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
             String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs, new ArrayList<>());
             createGPTEnhancedTestFile(putsFile, newPUTs);
-        } else if(operation.equals("detectSimilarIn")) {
+        } else if(operation.equals("detectSimilarIn")) { // Similar tests to PUTify
             detectSimilarTestsInFile(inputFile);
-        } else if(operation.equals("detectSimilar")) {
+        } else if(operation.equals("detectSimilar")) { // Similar tests to PUTify
             detectSimilarTestsInRepoAndGenerateReport(inputFile);
             System.out.println("Total Redundant Tests: " + TotalRedundantTests);
             System.out.println("Total New PUTs: " + TotalNewPuts);
-        } else if(operation.equals("retrofitIn")) {
+        } else if(operation.equals("retrofitIn")) { // Similar tests to PUTs
             CompilationUnit cu = configureJavaParserAndGetCompilationUnit(inputFile);
             List<List<UnitTest>> similarTest = detectSimilarTestsInFile(inputFile);
             List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTest, cu);

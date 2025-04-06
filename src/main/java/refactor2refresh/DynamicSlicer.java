@@ -1,175 +1,197 @@
 package refactor2refresh;
 
-import com.github.javaparser.StaticJavaParser;
-import com.github.javaparser.ast.NodeList;
-import com.github.javaparser.ast.body.MethodDeclaration;
-import com.github.javaparser.ast.expr.MethodCallExpr;
-import com.github.javaparser.ast.stmt.Statement;
-
-import javax.tools.JavaCompiler;
-import javax.tools.JavaFileObject;
-import javax.tools.StandardJavaFileManager;
-import javax.tools.ToolProvider;
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.Writer;
+import soot.*;
+import soot.jimple.*;
+import soot.options.Options;
+import soot.toolkits.graph.*;
+import soot.toolkits.scalar.*;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static refactor2refresh.Refactor2Refresh.getVariablesUsedInAssertion;
-
 public class DynamicSlicer {
+    private final Map<String, UnitGraph> methodToGraph = new HashMap<>();
+    private final Map<Unit, Set<Unit>> dependencyCache = new HashMap<>();
+    private final List<SlicingEvent> executionTrace = new ArrayList<>();
 
-    private static List<TraceEntry> executionTrace = new ArrayList<>();
+    public static class SlicingEvent {
+        final String className;
+        final String methodName;
+        final int lineNumber;
+        final long timestamp;
+        final String eventType;  // "methodEntry", "methodExit", "varWrite", "varRead"
+        final String varName;    // for variable events
+        final Object value;      // for variable events
 
-    public static void performDynamicSlicing(MethodDeclaration method, MethodCallExpr assertion) {
-        // Step 1: Instrument the method to collect execution trace
-        instrumentMethod(method);
-
-        // Step 2: Execute the instrumented method to capture the trace
-        executeInstrumentedMethod(method);
-
-        // Step 3: Analyze the trace to find relevant statements
-        Set<String> requiredVariables = getVariablesUsedInAssertion(assertion);
-        List<TraceEntry> dynamicSlice = computeDynamicSlice(requiredVariables);
-
-        // Step 4: Update the method to retain only relevant statements
-        retainStatementsInMethod(method, dynamicSlice);
-    }
-
-    private static void instrumentMethod(MethodDeclaration method) {
-        method.getBody().ifPresent(body -> {
-            NodeList<Statement> statements = new NodeList<>(body.getStatements()); // Copy to avoid concurrent modification
-            NodeList<Statement> newStatements = new NodeList<>();
-
-            for (int i = 0; i < statements.size(); i++) {
-                Statement stmt = statements.get(i);
-
-                // Generate valid Java code for logging
-                String logStmt = "DynamicSlicer.log(\"stmt-" + i + "\", \"Executed\");";
-                Statement logStatement = StaticJavaParser.parseStatement(logStmt);
-
-                // Add log statement before the original statement
-                newStatements.add(logStatement);
-                newStatements.add(stmt);
-            }
-
-            // Replace the original body with the modified one
-            body.setStatements(newStatements);
-        });
-    }
-
-    private static void executeInstrumentedMethod(MethodDeclaration method) {
-        // Assuming a runtime environment where the instrumented method can be executed
-        try {
-            Class<?> clazz = compileAndLoadClass(method);
-            Object instance = clazz.getDeclaredConstructor().newInstance();
-            clazz.getDeclaredMethod(String.valueOf(method.getName())).invoke(instance);
-        } catch (Exception e) {
-            e.printStackTrace();
+        public SlicingEvent(String className, String methodName, int lineNumber,
+                            String eventType, String varName, Object value) {
+            this.className = className;
+            this.methodName = methodName;
+            this.lineNumber = lineNumber;
+            this.timestamp = System.nanoTime();
+            this.eventType = eventType;
+            this.varName = varName;
+            this.value = value;
         }
     }
 
-    public static Class<?> compileAndLoadClass(MethodDeclaration method) throws IOException, ClassNotFoundException {
-        // Step 1: Generate the Java source code
-        String className = "InstrumentedTestClass";
-        String javaCode = generateClassWithMethod(className, method);
+    // Initialize Soot and set up analysis
+    public void initialize(String classPath, String className) {
+        G.reset();
+        Options.v().set_prepend_classpath(true);
+        Options.v().set_allow_phantom_refs(true);
+        Options.v().set_soot_classpath(classPath);
+        Options.v().set_output_format(Options.output_format_none);
+        Scene.v().loadNecessaryClasses();
 
-        // Step 2: Write the code to a temporary file
-        File tempDir = new File(System.getProperty("java.io.tmpdir"));
-        File sourceFile = new File(tempDir, className + ".java");
-        try (Writer writer = new FileWriter(sourceFile)) {
-            writer.write(javaCode);
-        }
+        SootClass sc = Scene.v().loadClassAndSupport(className);
+        sc.setApplicationClass();
 
-        // Step 3: Compile the source file
-        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
-        if (compiler == null) {
-            throw new IllegalStateException("Java Compiler not available. Ensure JDK is used instead of JRE.");
-        }
-        StandardJavaFileManager fileManager = compiler.getStandardFileManager(null, null, null);
-        Iterable<? extends JavaFileObject> compilationUnits = fileManager.getJavaFileObjects(sourceFile);
-
-        boolean success = compiler.getTask(null, fileManager, null, null, null, compilationUnits).call();
-        if (!success) {
-            throw new RuntimeException("Compilation failed. Check the source code.");
-        }
-
-        fileManager.close();
-
-        // Step 4: Load the compiled class
-        File compiledClassFile = new File(tempDir, className + ".class");
-        ClassLoader classLoader = new DynamicClassLoader(tempDir);
-        return classLoader.loadClass(className);
-    }
-
-    private static String generateClassWithMethod(String className, MethodDeclaration method) {
-        // Wrap the method into a simple class for compilation
-        return "public class " + className + " {\n" +
-                "    public void " + method.getName() + "() {\n" +
-                method.getBody().orElseThrow() +
-                "    }\n" +
-                "}";
-    }
-
-    // Custom class loader to load classes from the temporary directory
-    private static class DynamicClassLoader extends ClassLoader {
-        private final File directory;
-
-        public DynamicClassLoader(File directory) {
-            this.directory = directory;
-        }
-
-        @Override
-        protected Class<?> findClass(String name) throws ClassNotFoundException {
-            File classFile = new File(directory, name + ".class");
-            if (!classFile.exists()) {
-                throw new ClassNotFoundException("Class file not found: " + name);
-            }
-            try {
-                byte[] bytes = java.nio.file.Files.readAllBytes(classFile.toPath());
-                return defineClass(name, bytes, 0, bytes.length);
-            } catch (IOException e) {
-                throw new ClassNotFoundException("Error reading class file: " + name, e);
+        // Build dependency graphs for each method
+        for (SootMethod method : sc.getMethods()) {
+            if (method.hasActiveBody()) {
+                Body body = method.retrieveActiveBody();
+                UnitGraph graph = new ExceptionalUnitGraph(body);
+                methodToGraph.put(method.getSignature(), graph);
+                buildDependencyCache(graph);
             }
         }
     }
 
-    public static void log(String stmtId, Object value) {
-        // Log the execution of a statement and its resulting variable values
-        executionTrace.add(new TraceEntry(stmtId, value));
+    // Build static dependency information
+    private void buildDependencyCache(UnitGraph graph) {
+        for (Unit unit : graph) {
+            Set<Unit> dependencies = new HashSet<>();
+
+            // Data dependencies
+            for (ValueBox valueBox : unit.getUseBoxes()) {
+                Value value = valueBox.getValue();
+                if (value instanceof Local) {
+                    Local local = (Local) value;
+                    dependencies.addAll(findLastDefinition(graph, unit, local));
+                }
+            }
+
+            // Control dependencies
+            if (unit instanceof IfStmt || unit instanceof SwitchStmt) {
+                dependencies.addAll(getControlDependencies(graph, unit));
+            }
+
+            dependencyCache.put(unit, dependencies);
+        }
     }
 
-    private static List<TraceEntry> computeDynamicSlice(Set<String> requiredVariables) {
-        List<TraceEntry> relevantTraceEntries = new ArrayList<>();
-        Collections.reverse(executionTrace); // Reverse to process in backward order
+    // Find the last definition of a variable
+    private Set<Unit> findLastDefinition(UnitGraph graph, Unit current, Local local) {
+        Set<Unit> definitions = new HashSet<>();
+        Set<Unit> visited = new HashSet<>();
+        Queue<Unit> worklist = new LinkedList<>();
 
-        for (TraceEntry entry : executionTrace) {
-            if (entry.usesVariables(requiredVariables)) {
-                relevantTraceEntries.add(entry);
-                requiredVariables.addAll(entry.getDefinedVariables());
+        worklist.add(current);
+        visited.add(current);
+
+        while (!worklist.isEmpty()) {
+            Unit unit = worklist.poll();
+
+            for (Unit pred : graph.getPredsOf(unit)) {
+                if (pred instanceof DefinitionStmt) {
+                    DefinitionStmt def = (DefinitionStmt) pred;
+                    if (def.getLeftOp().equals(local)) {
+                        definitions.add(pred);
+                        continue;
+                    }
+                }
+
+                if (!visited.contains(pred)) {
+                    visited.add(pred);
+                    worklist.add(pred);
+                }
             }
         }
 
-        Collections.reverse(relevantTraceEntries); // Restore original order
-        return relevantTraceEntries;
+        return definitions;
     }
 
-    private static void retainStatementsInMethod(MethodDeclaration method, List<TraceEntry> dynamicSlice) {
-        method.getBody().ifPresent(body -> {
-            List<Statement> statements = body.getStatements();
-            Set<String> relevantStmtIds = dynamicSlice.stream()
-                    .map(TraceEntry::getStmtId)
-                    .collect(Collectors.toSet());
+    // Get control dependencies
+    private Set<Unit> getControlDependencies(UnitGraph graph, Unit unit) {
+        Set<Unit> dependencies = new HashSet<>();
 
-            // Remove irrelevant statements
-            statements.removeIf(stmt -> !relevantStmtIds.contains(getStatementId(stmt)));
-        });
+        if (unit instanceof IfStmt) {
+            IfStmt ifStmt = (IfStmt) unit;
+            dependencies.addAll(ifStmt.getCondition().getUseBoxes()
+                    .stream()
+                    .map(ValueBox::getValue)
+                    .filter(v -> v instanceof Local)
+                    .map(v -> findLastDefinition(graph, unit, (Local) v))
+                    .flatMap(Set::stream)
+                    .collect(Collectors.toSet()));
+        }
+
+        return dependencies;
     }
 
-    private static String getStatementId(Statement stmt) {
-        // Extract the statement ID from its logging statement
-        return "stmt-" + executionTrace.indexOf(stmt);
+    // Record execution event
+    public void recordEvent(SlicingEvent event) {
+        executionTrace.add(event);
+    }
+
+    // Compute backward slice from a given criterion
+    public Set<SlicingEvent> computeBackwardSlice(SlicingEvent criterion) {
+        Set<SlicingEvent> slice = new HashSet<>();
+        Queue<SlicingEvent> worklist = new LinkedList<>();
+
+        slice.add(criterion);
+        worklist.add(criterion);
+
+        while (!worklist.isEmpty()) {
+            SlicingEvent current = worklist.poll();
+
+            // Find relevant method
+            String methodSig = getMethodSignature(current);
+            UnitGraph graph = methodToGraph.get(methodSig);
+
+            if (graph != null) {
+                // Find corresponding unit
+                Unit unit = findUnitByLineNumber(graph, current.lineNumber);
+
+                if (unit != null) {
+                    // Get dependencies
+                    Set<Unit> dependencies = dependencyCache.get(unit);
+
+                    if (dependencies != null) {
+                        // Find corresponding events in execution trace
+                        for (Unit dep : dependencies) {
+                            SlicingEvent depEvent = findMatchingEvent(dep);
+                            if (depEvent != null && !slice.contains(depEvent)) {
+                                slice.add(depEvent);
+                                worklist.add(depEvent);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return slice;
+    }
+
+    private String getMethodSignature(SlicingEvent event) {
+        return event.className + ": " + event.methodName;
+    }
+
+    private Unit findUnitByLineNumber(UnitGraph graph, int lineNumber) {
+        for (Unit unit : graph) {
+            if (unit.getJavaSourceStartLineNumber() == lineNumber) {
+                return unit;
+            }
+        }
+        return null;
+    }
+
+    private SlicingEvent findMatchingEvent(Unit unit) {
+        // Find the most recent event that matches this unit
+        return executionTrace.stream()
+                .filter(e -> e.lineNumber == unit.getJavaSourceStartLineNumber())
+                .reduce((first, second) -> second)
+                .orElse(null);
     }
 }

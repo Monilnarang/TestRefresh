@@ -31,12 +31,12 @@ enum StatementType {
     POSTFIX_DECREMENT,
     PREFIX_INCREMENT,
     PREFIX_DECREMENT,
-    ARRAY_TYPE, ARRAY_INITIALIZER_EXPR, BOOLEAN_LITERAL, FOR_STMT, IF_STMT, TRY_STMT, CATCH_CLAUSE, NULL_LITERAL, THROW_STMT, RETURN_STMT, SWITCH_STMT, SWITCH_ENTRY, LOCAL_CLASS_DECLARATION, LAMBDA_EXPR, CONDITIONAL_EXPR, ENCLOSED_EXPR, INSTANCEOF_EXPR, THIS_EXPR, SUPER_EXPR, CLASS_EXPR, TYPE_EXPR, MARKER_ANNOTATION, SINGLE_MEMBER_ANNOTATION, NORMAL_ANNOTATION, BREAK_STMT, CONTINUE_STMT, ASSERT_STMT, METHOD_REFERENCE, ARRAY_CREATION_EXPR, ARRAY_ACCESS_EXPR, CAST_EXPR, BLOCK_STMT, WHILE_STMT, PARAMETER, ARRAY_CREATION_LEVEL, ASSIGN_EXPR, WILDCARD_TYPE, FOR_EACH_STMT, METHOD_DECLARATION, FIELD_DECLARATION, UNKNOWN_TYPE,
+    ARRAY_TYPE, ARRAY_INITIALIZER_EXPR, BOOLEAN_LITERAL, FOR_STMT, IF_STMT, TRY_STMT, CATCH_CLAUSE, NULL_LITERAL, THROW_STMT, RETURN_STMT, SWITCH_STMT, SWITCH_ENTRY, LOCAL_CLASS_DECLARATION, LAMBDA_EXPR, CONDITIONAL_EXPR, ENCLOSED_EXPR, INSTANCEOF_EXPR, THIS_EXPR, SUPER_EXPR, CLASS_EXPR, TYPE_EXPR, MARKER_ANNOTATION, SINGLE_MEMBER_ANNOTATION, NORMAL_ANNOTATION, BREAK_STMT, CONTINUE_STMT, ASSERT_STMT, METHOD_REFERENCE, ARRAY_CREATION_EXPR, ARRAY_ACCESS_EXPR, CAST_EXPR, BLOCK_STMT, WHILE_STMT, PARAMETER, ARRAY_CREATION_LEVEL, ASSIGN_EXPR, WILDCARD_TYPE, FOR_EACH_STMT, METHOD_DECLARATION, FIELD_DECLARATION, UNKNOWN_TYPE, NAME, VOID_TYPE,
 }
 public class SlicingUtils {
     private HashMap<String, ArrayList<String>> variableMap = new HashMap<String, ArrayList<String>>(); // key: variable name, value: variable type & variable value
 
-    public static void addValue(TreeMap<Integer, ArrayList<LiteralStringValueExpr>> map, Integer key, LiteralStringValueExpr value) {
+    public static void addValue(TreeMap<Integer, ArrayList<LiteralExpr>> map, Integer key, LiteralExpr value) {
         // Check if the key exists
         if (!map.containsKey(key)) {
             // If the key does not exist, create a new ArrayList
@@ -46,12 +46,16 @@ public class SlicingUtils {
         map.get(key).add(value);
     }
 
-    public static ArrayList<TrieLikeNode> createTrieFromStatementsWrapper(NodeList<Node> Statements, TreeMap<Integer, ArrayList<LiteralStringValueExpr>> valueSets) {
+    public static ArrayList<TrieLikeNode> createTrieFromStatementsWrapper(NodeList<Node> Statements, TreeMap<Integer, ArrayList<LiteralExpr>> valueSets) {
         HashMap<String, Integer> hardcodedMap = new HashMap<>();
         return createTrieFromStatements(Statements, hardcodedMap, valueSets);
     }
 
-    public static ArrayList<TrieLikeNode> createTrieFromStatementsNew(NodeList<Node> Statements, HashMap<String, Integer> hardcodedMap, TreeMap<Integer, ArrayList<LiteralStringValueExpr>> valueSets) {
+    public static LiteralStringValueExpr arrayExpressionToLiteralExprAdapter(String value) {
+        return new StringLiteralExpr(value);
+    }
+
+    public static ArrayList<TrieLikeNode> createTrieFromStatementsNew(NodeList<Node> Statements, HashMap<String, Integer> hardcodedMap, TreeMap<Integer, ArrayList<LiteralExpr>> valueSets) {
         ArrayList<TrieLikeNode> trieLikeNodes = new ArrayList<TrieLikeNode>();
 
         for (Node stmt : Statements) {
@@ -147,10 +151,20 @@ public class SlicingUtils {
                         arrayValue.append(", ");
                     }
                     first = false;
-                    arrayValue.append(child.toString());  // Convert each child node to string and append
+                    // Convert each child node to string and append
+                    // Check if the child is a StringLiteralExpr and extract the raw string
+                    if (child instanceof com.github.javaparser.ast.expr.StringLiteralExpr) {
+                        String rawValue = ((com.github.javaparser.ast.expr.StringLiteralExpr) child).asString();
+                        arrayValue.append("'").append(rawValue).append("'");
+                    } else {
+                        arrayValue.append("'").append(child.toString()).append("'");
+                    }
                 }
                 arrayValue.append("}");
-
+                if (!hardcodedMap.containsKey(arrayValue.toString())) {
+                    hardcodedMap.put(arrayValue.toString(), hardcodedMap.size() + 1);;
+                    addValue(valueSets, hardcodedMap.size(), arrayExpressionToLiteralExprAdapter(arrayValue.toString()));
+                }
                 stmtNode.value = arrayValue.toString();  // Store the entire array as a single value
                 stmtNode.type = StatementType.LITERAL;  // Treat as a literal
             }
@@ -235,8 +249,13 @@ public class SlicingUtils {
                 }
             } else if (stmt instanceof BooleanLiteralExpr) {
                 BooleanLiteralExpr booleanExpr = ((BooleanLiteralExpr) stmt).clone();  // Clone the boolean literal expression
+                // Convert the boolean value to string ("true" or "false")
+                if (!hardcodedMap.containsKey(String.valueOf(booleanExpr.getValue()))) {
+                    hardcodedMap.put(String.valueOf(booleanExpr.getValue()), hardcodedMap.size() + 1);
+                    addValue(valueSets, hardcodedMap.size(), booleanExpr);
+                }
                 stmtNode.type = StatementType.BOOLEAN_LITERAL;
-                stmtNode.value = Boolean.toString(booleanExpr.getValue());  // Convert the boolean value to string ("true" or "false")
+                stmtNode.value = Boolean.toString(booleanExpr.getValue());
             }
             else if (stmt instanceof Modifier) {
                 stmtNode.type = StatementType.PRIMITIVE;
@@ -647,6 +666,17 @@ public class SlicingUtils {
                     stmtNode.type = StatementType.UNKNOWN_TYPE;
                     stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
                 }
+            } else if (stmt instanceof VoidType) {
+                VoidType voidType = ((VoidType) stmt).clone();
+                if (voidType.getChildNodes().size() > 0) {
+                    NodeList<Node> childNodes = new NodeList<>();
+                    int voidTypeSize = voidType.getChildNodes().size();
+                    for (int i = 0; i < voidTypeSize; i++) {
+                        childNodes.add(voidType.getChildNodes().get(i).clone());
+                    }
+                    stmtNode.type = StatementType.VOID_TYPE;
+                    stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
+                }
             }
             else {
                 throw new IllegalStateException("Unexpected value: " + stmt);
@@ -656,7 +686,7 @@ public class SlicingUtils {
         }
         return trieLikeNodes;
     }
-    public static ArrayList<TrieLikeNode> createTrieFromStatements(NodeList<Node> Statements, HashMap<String, Integer> hardcodedMap, TreeMap<Integer, ArrayList<LiteralStringValueExpr>> valueSets) { // one array per test
+    public static ArrayList<TrieLikeNode> createTrieFromStatements(NodeList<Node> Statements, HashMap<String, Integer> hardcodedMap, TreeMap<Integer, ArrayList<LiteralExpr>> valueSets) { // one array per test
         ArrayList<TrieLikeNode> trieLikeNodes = new ArrayList<TrieLikeNode>();
         for (Node stmt : Statements) {
             TrieLikeNode stmtNode = new TrieLikeNode();
@@ -752,8 +782,21 @@ public class SlicingUtils {
                     stmtNode.children = createTrieFromStatements(childNodes, hardcodedMap, valueSets);
                 }
             }
+            // todo didn't handle Unexpected value: SuppressWarnings
+            else if (stmt instanceof Name) {
+                Name name = ((Name) stmt).clone();
+                if (name.getChildNodes().size() > 0) {
+                    NodeList<Node> childNodes = new NodeList<>();
+                    int nameSize = name.getChildNodes().size();
+                    for (int i = 0; i < nameSize; i++) {
+                        childNodes.add(name.getChildNodes().get(0));
+                    }
+                    stmtNode.type = StatementType.NAME;
+                    stmtNode.children = createTrieFromStatements(childNodes, hardcodedMap, valueSets);
+                }
+            }
             else if (stmt instanceof NameExpr) {
-                NameExpr nameExpr = (NameExpr) stmt;
+                NameExpr nameExpr = ((NameExpr) stmt).clone();
                 if (nameExpr.getChildNodes().size() > 0) {
                     NodeList<Node> childNodes = new NodeList<>();
                     int nameExprSize = nameExpr.getChildNodes().size();
@@ -766,13 +809,13 @@ public class SlicingUtils {
 //                System.out.println(nameExpr.getName());
             } // call children
             else if (stmt instanceof SimpleName) {
-                SimpleName simpleName = (SimpleName) stmt;
+                SimpleName simpleName = ((SimpleName) stmt).clone();
                 stmtNode.type = StatementType.SIMPLE_NAME;
                 stmtNode.value = simpleName.getIdentifier();
 //                System.out.println(simpleName.asString());
             } // save current value
             else if (stmt instanceof ObjectCreationExpr) {
-                ObjectCreationExpr objCreationExpr = (ObjectCreationExpr) stmt;
+                ObjectCreationExpr objCreationExpr = ((ObjectCreationExpr) stmt).clone();
                 if (objCreationExpr.getChildNodes().size() > 0) {
                     NodeList<Node> childNodes = new NodeList<>();
                     int objCreationExprSize = objCreationExpr.getChildNodes().size();
@@ -886,16 +929,25 @@ public class SlicingUtils {
             Variable variable = new Variable();
             if(trie.children.get(0).type == StatementType.PRIMITIVE) {
                 variable.type = trie.children.get(0).type.toString();
+            } else if (trie.children.get(0).type == StatementType.CLASS_OR_INTERFACE_TYPE) {
+                try {
+                    variable.type = trie.children.get(0).children.get(0).value;
+                } catch (Exception e) {
+                    System.out.println("exception 2");
+                    System.out.println(e.getCause());
+                }
             } else {
-                variable.type = trie.children.get(0).children.get(0).value;
+                variable.type = null;
             }
 
             variable.name = trie.children.get(1).value;
-//            try {
+            try {
                 variable.value = getVariableValue(trie.children.get(2));
-//            } catch (Exception e) {
-//                System.out.println(e.getCause());
-//            }
+            } catch (Exception e) {
+                // if variable isn't initialized, assumed null
+                // todo: later update the value if it is initialized or changed
+                variable.value = null;
+            }
 
             variableMap.put(variable.name, variable);
         } else {
@@ -945,6 +997,16 @@ public class SlicingUtils {
         return true;
     }
 
+    public static boolean checkIfSameSimpleName(TrieLikeNode trie1, TrieLikeNode trie2) {
+        for (int i = 0; i < trie1.children.size(); i++) {
+            if (trie1.children.get(i).type == StatementType.SIMPLE_NAME) {
+                if (!trie1.children.get(i).value.equals(trie2.children.get(i).value))
+                    return false;
+            }
+        }
+        return true;
+    }
+
     public static boolean checkIfTypeOfClassVariableDeclaratorIsSame(TrieLikeNode trie1, TrieLikeNode trie2) {
         ArrayList<TrieLikeNode> trie1Children = trie1.children.get(0).children;
         ArrayList<TrieLikeNode> trie2Children = trie2.children.get(0).children;
@@ -975,12 +1037,37 @@ public class SlicingUtils {
         return true;
     }
 
+    public static boolean compareArrays(TrieLikeNode trie1, TrieLikeNode trie2) {
+        if(trie1.children.size() != trie2.children.size())
+            return false;
+        for (int i=0; i<trie1.children.size(); i++) {
+            if(trie1.children.get(i).type == null)
+                continue;
+            if(trie1.children.get(i).type == StatementType.ARRAY_CREATION_LEVEL) {
+                if(!compareArrays(trie1.children.get(i), trie2.children.get(i)))
+                    return false;
+            }
+            else if (!trie1.children.get(i).value.equals(trie2.children.get(i).value))
+                return false;
+        }
+        return true;
+    }
+
 
     public static boolean compare(TrieLikeNode trie1, TrieLikeNode trie2, HashMap<String, String> crossVariableMap) {
         if (trie1.type != trie2.type || trie1.children.size() != trie2.children.size())
             return false;
 
-        if (trie1.type == StatementType.VARIABLE_DECLARATOR) {
+
+        if (trie1.type == StatementType.EXPRESSION_STMT || trie1.type == StatementType.NAME_EXPR) {
+            if(!checkIfSameSimpleName(trie1, trie2))
+                return false;
+        }
+        else if (trie1.type == StatementType.METHOD_CALL) {
+            if(!checkIfSameSimpleName(trie1, trie2))
+                return false;
+        }
+        else if (trie1.type == StatementType.VARIABLE_DECLARATOR) {
             String name1 = trie1.children.get(1).value;
             String name2 = trie2.children.get(1).value;
             if (name1.equals("fmt")) {
@@ -1001,12 +1088,21 @@ public class SlicingUtils {
                     if(trie1.children.get(2).children.size() != trie2.children.get(2).children.size())
                         return false;
                     for (int i=0; i<trie1.children.get(2).children.size(); i++) {
-                        if(!trie1.children.get(2).children.get(i).value.equals(trie2.children.get(2).children.get(i).value))
-                            return false;
+                        try {
+                            if(!compareArrays(trie1.children.get(2).children.get(i), trie2.children.get(2).children.get(i)))
+                                return false;
+                        } catch (Exception e) {
+                            System.out.println("exception 3");
+                            System.out.println(e.getCause());
+                        }
+
                     }
             } else if(trie1.children.get(0).type == StatementType.PRIMITIVE) {
                     System.out.println("primitive");
-            } else {
+            } else if (trie1.children.get(0).type == null) {
+                System.out.println("primitive, null?");
+            }
+            else {
                     System.out.println("handle new type ");
             }
             if (crossVariableMap.containsKey(name1)) {

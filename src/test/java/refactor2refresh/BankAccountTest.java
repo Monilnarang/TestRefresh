@@ -42,4 +42,15 @@ class BankAccountTest {
         });
         assertEquals("Initial balance cannot be negative", exception.getMessage());
     }
+
+    @Test
+    void testWithDraw() {
+        BankAccount account = new BankAccount(100.0);
+        account.withdraw(50.0);
+        assertEquals(50.0, account.getBalance());
+
+        BankAccount account2 = new BankAccount(555.0);
+        account.withdraw(50.0);
+        assertEquals(505.0, account.getBalance());
+    }
 }
