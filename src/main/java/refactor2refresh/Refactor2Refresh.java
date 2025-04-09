@@ -1556,24 +1556,17 @@ public class Refactor2Refresh {
                     }
 
                     totalConsideredTests.getAndIncrement();
-                    if(hasComplexControlStructures(testMethod)) {
-
-                        return; // Skip this test method
-                    }
 
                     AtomicInteger counter = new AtomicInteger(1);
                     List<MethodDeclaration> purifiedTestsOfOriginalTest = new ArrayList<>();
                     // Collect all assert statements for backward slicing
-                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
-                            .stream()
-                            .filter(call -> call.getNameAsString().startsWith("assert"))
-                            .collect(Collectors.toList());
+                    List<MethodCallExpr> assertions = extractAssertions(testMethod);
 
                     HashMap<String, NodeList<Node>> statementNodesListMap = new HashMap<>();
 
                     // Generate a separate test method for each assertion
                     assertions.forEach(assertStatement -> {
-                        // Clone the original method to create an purified version
+                        // Clone the original method to create a purified version
                         MethodDeclaration purifiedMethod = testMethod.clone();
                         String methodName = testMethod.getNameAsString() + "_" + counter.getAndIncrement();
                         purifiedMethod.setName(methodName);
@@ -1585,7 +1578,7 @@ public class Refactor2Refresh {
                             }
                         });
 
-                        // New code to remove statements after the current assert statement
+                        // Remove statements after the current assert statement
                         List<Statement> statements = purifiedMethod.findAll(BlockStmt.class)
                                 .get(0).getStatements(); // Assuming the first BlockStmt is the method body
 
@@ -1623,7 +1616,7 @@ public class Refactor2Refresh {
                     if (separableComponents > 1) {
                         System.out.println(testMethod.getNameAsString() + ":");
                         System.out.println(separableComponents + ", ");
-                        result.testMethodComponents.put(testMethod.getNameAsString(), separableComponents);
+                        result.independentLogicsInTest.put(testMethod.getNameAsString(), separableComponents);
                         try {
                             result.listPastaTests.add(testMethod.getNameAsString());
                         } catch (Exception e) {
@@ -1713,7 +1706,7 @@ public class Refactor2Refresh {
 
                 Map<Integer, Integer> separableComponentFrequency = new HashMap<>();
                 for (TestFileResult result : results) {
-                    for (int components : result.testMethodComponents.values()) {
+                    for (int components : result.independentLogicsInTest.values()) {
                         separableComponentFrequency.put(components, separableComponentFrequency.getOrDefault(components, 0) + 1);
                     }
                 }
@@ -1751,7 +1744,7 @@ public class Refactor2Refresh {
                                     .toString();
                             // Format test method details
                             StringBuilder testMethodDetails = new StringBuilder();
-                            result.testMethodComponents.forEach((methodName, components) -> {
+                            result.independentLogicsInTest.forEach((methodName, components) -> {
                                 testMethodDetails.append(methodName).append(" (").append(components).append("), ");
                             });
 
@@ -1890,6 +1883,45 @@ public class Refactor2Refresh {
         }
     }
 
+
+    // Helper method to check if a method call is part of an assertion chain
+    private static boolean isAssertionMethodChain(MethodCallExpr methodCall) {
+        // Check if this method starts with "assert"
+        if (methodCall.getNameAsString().startsWith("assert")) {
+            return true;
+        }
+
+        // Check if the scope (parent method call) is an assertion
+        if (methodCall.getScope().isPresent() && methodCall.getScope().get() instanceof MethodCallExpr) {
+            return isAssertionMethodChain((MethodCallExpr) methodCall.getScope().get());
+        }
+
+        return false;
+    }
+
+    public static List<MethodCallExpr> extractAssertions(MethodDeclaration testMethod) {
+        List<Statement> assertionStatements = testMethod.findAll(ExpressionStmt.class)
+                .stream()
+                .filter(stmt -> {
+                    Expression expr = stmt.getExpression();
+                    // Look for method call expressions that either:
+                    // 1. Start with "assert" directly (like assertEquals())
+                    // 2. Are part of a method chain that starts with "assert" (like assertThat().isFalse())
+                    if (expr instanceof MethodCallExpr) {
+                        MethodCallExpr methodCall = (MethodCallExpr) expr;
+                        return isAssertionMethodChain(methodCall);
+                    }
+                    return false;
+                })
+                .collect(Collectors.toList());
+        List<MethodCallExpr> assertions = assertionStatements.stream()
+                .map(stmt -> (ExpressionStmt) stmt)
+                .map(ExpressionStmt::getExpression)
+                .map(expr -> (MethodCallExpr) expr)
+                .collect(Collectors.toList());
+        return assertions;
+    }
+
     public static ResultSeparateIndependentAssertionClustersAndAddToClass separateIndependentAssertionClustersAndAddToClass(ClassOrInterfaceDeclaration originalClass, ClassOrInterfaceDeclaration newClass, TestFileResult result) {
         // separate independent assertion clusters from the original class and add to new class
         AtomicInteger newSeparatedTests = new AtomicInteger();
@@ -1902,10 +1934,7 @@ public class Refactor2Refresh {
                     AtomicInteger counter = new AtomicInteger(1);
                     List<MethodDeclaration> purifiedTestsOfOriginalTest = new ArrayList<>();
                     // Collect all assert statements for backward slicing
-                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
-                            .stream()
-                            .filter(call -> call.getNameAsString().startsWith("assert"))
-                            .collect(Collectors.toList());
+                    List<MethodCallExpr> assertions = extractAssertions(testMethod);
 
                     HashMap<String, NodeList<Node>> statementNodesListMap = new HashMap<>();
 
@@ -2265,6 +2294,13 @@ public class Refactor2Refresh {
         }
         else if (operation.equals("fixInRepo")) {
             fixAssertionPastaInRepo(inputFile);
+        } else if(operation.equals("fixinfile")) {
+            List<TestFileResult> clutters = new ArrayList<>();
+            clutters.add(identifyAssertionPastas(inputFile));
+            ResultCreateRefreshedTestFilesInSandbox result = createRefreshedTestFilesInSandbox(clutters);
+            System.out.println("Total new separated tests created: " + result.totalNewSeparatedTestsCreated);
+            System.out.println("Total potential PUTs: " + result.totalPotentialPuts);
+            System.out.println("Total new PUTs created: " + result.totalNewPUTsCreated);
         }
         else if (operation.equals("fixin")) {
             if(args.length < 3) {
