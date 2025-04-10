@@ -34,6 +34,8 @@ import java.util.stream.Collectors;
 
 public class Refactor2Refresh {
 
+    public static Map<String, Set<MethodCallExpr>> objectStateModifications;
+
     public static int TotalRedundantTests = 0;
     public static int TotalNewPuts = 0;
     // Parameterizer
@@ -707,6 +709,23 @@ public class Refactor2Refresh {
     }
 
     public static boolean checkMethodExpressionsAndRequiredObjects(MethodCallExpr methodCallExpr, Set<String> requiredObjectMethodCalls) {
+        if (methodCallExpr.getScope().isPresent()) {
+            String objectName = methodCallExpr.getScope().get().toString();
+            // Methods that likely modify state (not getters)
+            if (!methodCallExpr.getNameAsString().startsWith("get") &&
+                    !methodCallExpr.getNameAsString().startsWith("is")) {
+                // Record this state-modifying call
+                objectStateModifications.computeIfAbsent(objectName, k -> new HashSet<>()).add(methodCallExpr);
+            }
+
+            // If this is a getter on an object that had state modifications, consider it dependent
+            if ((methodCallExpr.getNameAsString().startsWith("get") ||
+                    methodCallExpr.getNameAsString().startsWith("is")) &&
+                    objectStateModifications.containsKey(objectName)) {
+                return true;
+            }
+        }
+
         List<MethodCallExpr> methodCallExprs = methodCallExpr.findAll(MethodCallExpr.class);
         boolean isRelevant = methodCallExprs.stream()
                 .map(call -> call.getScope().map(Object::toString).orElse(""))
@@ -737,8 +756,24 @@ public class Refactor2Refresh {
         // Track method calls on required objects
         Set<String> requiredObjectMethodCalls = new HashSet<>();
 
+        //  map to track object state dependencie
+        objectStateModifications = new HashMap<>();
+
+
         // Identify method calls on required objects in the assertion
         findObjectMethodCalls(assertion, requiredVariables, requiredObjectMethodCalls);
+
+        if (assertion.getScope().isPresent()) {
+            MethodCallExpr innerCall = assertion;
+            while (innerCall.getScope().isPresent() && innerCall.getScope().get() instanceof MethodCallExpr) {
+                innerCall = (MethodCallExpr) innerCall.getScope().get();
+            }
+
+            if (innerCall.getScope().isPresent()) {
+                String objectName = innerCall.getScope().get().toString();
+                requiredObjectMethodCalls.add(objectName);
+            }
+        }
 
         // Expand required variables based on beforeMethodDependencies
         Set<String> expandedRequiredVariables = expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies);
@@ -848,6 +883,14 @@ public class Refactor2Refresh {
 
                 // If the scope is a required variable, add it to tracked method calls
                 if (requiredVariables.contains(scopeAsString)) {
+                    requiredObjectMethodCalls.add(scopeAsString);
+                }
+
+                // Also add objects directly used in assertions, even if not in requiredVariables
+                if (scope instanceof MethodCallExpr) {
+                    findObjectMethodCalls(scope, requiredVariables, requiredObjectMethodCalls);
+                } else {
+                    // Add all object names as potentially required objects
                     requiredObjectMethodCalls.add(scopeAsString);
                 }
             });
