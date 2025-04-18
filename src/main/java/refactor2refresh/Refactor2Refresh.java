@@ -316,18 +316,19 @@ public class Refactor2Refresh {
 
         // Get the parameter count and data size
         int parameterCount = parameter_to_values_map.size();
-        int dataSize = parameter_to_values_map.get(1).size();  // Assuming at least one parameter exists
+        int dataSize = parameter_to_values_map.firstEntry().getValue().size();  // Assuming at least one parameter exists
 
         // For each test case, create an arguments() call
         for (int i = 0; i < dataSize; i++) {
             MethodCallExpr argumentsCall = new MethodCallExpr();
             argumentsCall.setName("arguments");
 
-            // Add all parameters for this test case
-            for (int j = 1; j <= parameterCount; j++) {
-                ArrayList<LiteralExpr> values = parameter_to_values_map.get(j);
-                LiteralExpr value = values.get(i);
-                argumentsCall.addArgument(value.clone());  // Clone to avoid modifying original
+            for (Map.Entry<Integer, ArrayList<LiteralExpr>> entry : parameter_to_values_map.entrySet()) {
+                ArrayList<LiteralExpr> values = entry.getValue();
+                if (i < values.size()) {
+                    LiteralExpr value = values.get(i);
+                    argumentsCall.addArgument(value.clone());  // Clone to avoid modifying original
+                }
             }
 
             streamOfCall.addArgument(argumentsCall);
@@ -341,23 +342,183 @@ public class Refactor2Refresh {
         return providerMethod;
     }
 
+
+    static class PathNode {
+        TrieLikeNode node;
+        int path;
+
+        PathNode(TrieLikeNode node, int path) {
+            this.node = node;
+            this.path = path;
+        }
+    }
+
+    public static TreeMap<Integer, ArrayList<LiteralExpr>> path_to_values_map(ArrayList<ArrayList<TrieLikeNode>> similar_tries) {
+        // Initialize the result map
+        TreeMap<Integer, ArrayList<LiteralExpr>> resultMap = new TreeMap<>();
+
+        // If there are no tries to process, return the empty map
+        if (similar_tries == null || similar_tries.isEmpty()) {
+            return resultMap;
+        }
+
+        // Process the first trie to establish paths
+        ArrayList<TrieLikeNode> firstTrie = similar_tries.get(0);
+
+        // For each root node in the first trie
+        for (int rootIndex = 0; rootIndex < firstTrie.size(); rootIndex++) {
+            TrieLikeNode root = firstTrie.get(rootIndex);
+
+            // Perform BFS starting from this root
+            Queue<PathNode> queue = new LinkedList<>();
+            queue.add(new PathNode(root, rootIndex)); // Start with the root path
+
+            int pathCounter = 0;
+
+            while (!queue.isEmpty()) {
+                PathNode current = queue.poll();
+                TrieLikeNode node = current.node;
+                int path = current.path;
+
+                // If this is a literal node, store its path and value
+                if (node.type == StatementType.LITERAL) {
+                    // Create a unique path ID
+                    int pathId = path * 10000 + pathCounter++;
+
+                    // Create a new entry for this path with the literal value
+                    ArrayList<LiteralExpr> values = new ArrayList<>();
+                    // Convert the string value to a LiteralExpr (this will need to be adapted
+                    // based on the actual type of literal)
+                    LiteralExpr literalExpr = createLiteralExpr(node.value);
+                    values.add(literalExpr);
+                    resultMap.put(pathId, values);
+                }
+
+                // Add all children to the queue with updated paths
+                for (int i = 0; i < node.children.size(); i++) {
+                    // Create a new path by appending the child index
+                    int newPath = path * 100 + i;
+                    queue.add(new PathNode(node.children.get(i), newPath));
+                }
+            }
+        }
+
+        // Process all remaining tries to collect their literal values for the same paths
+        for (int trieIndex = 1; trieIndex < similar_tries.size(); trieIndex++) {
+            ArrayList<TrieLikeNode> currentTrie = similar_tries.get(trieIndex);
+
+            // For each root node in the current trie
+            for (int rootIndex = 0; rootIndex < currentTrie.size(); rootIndex++) {
+                TrieLikeNode root = currentTrie.get(rootIndex);
+
+                // Perform BFS starting from this root
+                Queue<PathNode> queue = new LinkedList<>();
+                queue.add(new PathNode(root, rootIndex)); // Start with the root path
+
+                int pathCounter = 0;
+
+                while (!queue.isEmpty()) {
+                    PathNode current = queue.poll();
+                    TrieLikeNode node = current.node;
+                    int path = current.path;
+
+                    // If this is a literal node, find its corresponding path
+                    if (node.type == StatementType.LITERAL) {
+                        // Create the same unique path ID
+                        int pathId = path * 10000 + pathCounter++;
+
+                        // If this path exists in our map, add this trie's literal value
+                        if (resultMap.containsKey(pathId)) {
+                            ArrayList<LiteralExpr> values = resultMap.get(pathId);
+                            LiteralExpr literalExpr = createLiteralExpr(node.value);
+                            values.add(literalExpr);
+                        }
+                    }
+
+                    // Add all children to the queue with updated paths
+                    for (int i = 0; i < node.children.size(); i++) {
+                        // Create a new path by appending the child index
+                        int newPath = path * 100 + i;
+                        queue.add(new PathNode(node.children.get(i), newPath));
+                    }
+                }
+            }
+        }
+
+        return resultMap;
+    }
+
+    // Helper method to create the appropriate LiteralExpr based on the value
+    private static LiteralExpr createLiteralExpr(String value) {
+        // Check if it's null
+        if (value == null || value.equals("null")) {
+            return new NullLiteralExpr();
+        }
+
+        // Check if it's a boolean
+        if (value.equalsIgnoreCase("true") || value.equalsIgnoreCase("false")) {
+            return new BooleanLiteralExpr(Boolean.parseBoolean(value));
+        }
+
+        // Check if it's a character (enclosed in single quotes)
+        if (value.length() >= 3 && value.startsWith("'") && value.endsWith("'")) {
+            return new CharLiteralExpr(value.substring(1, value.length() - 1));
+        }
+
+        // Check if it's a string (enclosed in double quotes)
+        if (value.startsWith("\"") && value.endsWith("\"")) {
+            return new StringLiteralExpr(value.substring(1, value.length() - 1));
+        }
+
+        // Check if it's a long
+        if (value.endsWith("L") || value.endsWith("l")) {
+            try {
+                return new LongLiteralExpr(value);
+            } catch (NumberFormatException e) {
+                // Not a valid long, will continue to other checks
+            }
+        }
+
+        // Check if it's an integer
+        try {
+            Integer.parseInt(value);
+            return new IntegerLiteralExpr(value);
+        } catch (NumberFormatException e) {
+            // Not an integer, continue to other checks
+        }
+
+        // Check if it's a double
+        try {
+            Double.parseDouble(value);
+            return new DoubleLiteralExpr(value);
+        } catch (NumberFormatException e) {
+            // Not a valid number format
+        }
+
+        // Default to string literal if no other type matched
+        return new StringLiteralExpr(value);
+    }
+
     static List<MethodDeclaration> retrofitSimilarTestsTogether(List<List<UnitTest>> similarTestGroups, CompilationUnit cu) {
         List<MethodDeclaration> newPUTsList = new ArrayList<>();
         for( List<UnitTest> group : similarTestGroups) {
             if(group.size() < 2) {
                 continue;
             }
-            TreeMap<Integer, ArrayList<LiteralExpr>> parameter_to_values_map = new TreeMap<Integer, ArrayList<LiteralExpr>>();
+            TreeMap<Integer, ArrayList<LiteralExpr>> parameter_to_values_map_old = new TreeMap<Integer, ArrayList<LiteralExpr>>();
             String firstTestName = group.get(0).Name;
             String newTestName = generateParameterizedTestName(group); // use this for Assertion Pasta
 //            String newTestName = firstTestName + "_Parameterized";
+            ArrayList<ArrayList<TrieLikeNode>> tries = new ArrayList<ArrayList<TrieLikeNode>>();
             System.out.println("Group tests: ");
             for( UnitTest unitTest : group) {
                 System.out.println("Test Name: " + unitTest.Name);
                 HashMap<String, SlicingUtils.Variable> variableMap = new HashMap<String, SlicingUtils.Variable>();
                 HashMap<String, Integer> hardcodedMap = new HashMap<String, Integer>();
-                ArrayList<TrieLikeNode> trie = SlicingUtils.createTrieFromStatementsNew(unitTest.Statements, hardcodedMap, parameter_to_values_map);
+                tries.add(SlicingUtils.createTrieFromStatementsNew(unitTest.Statements, hardcodedMap, parameter_to_values_map_old));
             }
+
+            TreeMap<Integer, ArrayList<LiteralExpr>> parameter_to_values_map = path_to_values_map(tries);
             // extract method 1 from cu
             Optional<MethodDeclaration> methodOpt = cu.findAll(MethodDeclaration.class).stream()
                     .filter(m -> m.getNameAsString().equals(firstTestName))
@@ -968,6 +1129,7 @@ public class Refactor2Refresh {
 
         // Expand required variables based on beforeMethodDependencies
         Set<String> expandedRequiredVariables = expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies);
+        expandedRequiredVariables.addAll(requiredObjectMethodCalls);
 
         // Iterate over statements in reverse order to determine which ones to keep
         List<Statement> statements = method.getBody().orElseThrow().getStatements();
@@ -988,7 +1150,7 @@ public class Refactor2Refresh {
                         continue;
                     } else if(checkIfMethodArgumentsHaveRequiredObjects(methodCallExpr, expandedRequiredVariables, beforeMethodDependencies)) {
                         continue;
-                    } else if (checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls)) {
+                    } else if (checkMethodExpressionsAndRequiredObjects(methodCallExpr, expandedRequiredVariables)) {
                         // Add all variables used in the method call and expand dependencies
                         expandedRequiredVariables.addAll(getVariablesUsedInExpression(methodCallExpr));
                         expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
@@ -1008,7 +1170,7 @@ public class Refactor2Refresh {
                     List<MethodCallExpr> methodCallExprs = assignExpr.findAll(MethodCallExpr.class);
 
                     boolean anyMethodRelevant = methodCallExprs.stream()
-                            .anyMatch(methodCallExpr -> checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls));
+                            .anyMatch(methodCallExpr -> checkMethodExpressionsAndRequiredObjects(methodCallExpr, expandedRequiredVariables));
 
                     // Retain the statement if it defines a required variable, and add new dependencies
                     if (expandedRequiredVariables.contains(varName)) {
@@ -1035,7 +1197,7 @@ public class Refactor2Refresh {
                         // Check if the initializer contains any relevant method calls
                         boolean anyMethodRelevant = var.getInitializer()
                                 .map(initializer -> initializer.findAll(MethodCallExpr.class).stream()
-                                        .anyMatch(methodCallExpr -> checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls)))
+                                        .anyMatch(methodCallExpr -> checkMethodExpressionsAndRequiredObjects(methodCallExpr, expandedRequiredVariables)))
                                 .orElse(false);
 
                         // Retain the statement if it defines a required variable, and add new dependencies
@@ -1209,9 +1371,9 @@ public class Refactor2Refresh {
         // Value: Set of variables that depend on this variable
         Map<String, Set<String>> variableDependencies = new HashMap<>();
 
-        // Find all @Before methods
         List<MethodDeclaration> beforeMethods = testClass.getMethods().stream()
-                .filter(method -> method.getAnnotationByName("Before").isPresent())
+                .filter(method -> method.getAnnotationByName("Before").isPresent()
+                        || method.getAnnotationByName("BeforeEach").isPresent())
                 .collect(Collectors.toList());
 
         beforeMethods.forEach(beforeMethod -> {

@@ -10,5 +10,4 @@ public class TrieLikeNode {
     public TrieLikeNode() {
         this.children = new ArrayList<>();
     }
-
 }
