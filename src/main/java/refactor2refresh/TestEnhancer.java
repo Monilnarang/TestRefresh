@@ -6,8 +6,10 @@ import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.stmt.BlockStmt;
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter;
 
+import java.io.File;
 import java.io.FileWriter;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -21,6 +23,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.openai.OpenAiChatModel;
 import org.json.JSONObject;
 import org.json.JSONArray;
 
@@ -32,16 +39,15 @@ public class TestEnhancer {
     private static final String CLAUDE_MODEL = "claude-3-7-sonnet-20250219"; // Or your preferred model
 
     public static void main(String[] args) {
-        if (args.length != 2) {
-            System.out.println("Usage: java TestEnhancer <input_test_file_path> <output_test_file_path>");
+        if (args.length != 1) {
+            System.out.println("Usage: java TestEnhancer <input_test_file_path>");
             return;
         }
 
         String inputFilePath = args[0];
-        String outputFilePath = args[1];
 
         try {
-            enhanceTestFile(inputFilePath, outputFilePath);
+            String outputFilePath = enhanceTestFile(inputFilePath);
             System.out.println("Test enhancement completed successfully. Output file: " + outputFilePath);
         } catch (Exception e) {
             System.err.println("Error enhancing tests: " + e.getMessage());
@@ -49,9 +55,16 @@ public class TestEnhancer {
         }
     }
 
-    public static void enhanceTestFile(String inputFilePath, String outputFilePath) throws Exception {
+    public static String enhanceTestFile(String inputFilePath) throws Exception {
         // Parse the input Java file
         Path path = Paths.get(inputFilePath);
+        String fileName = path.getFileName().toString();
+        String directory = path.getParent().toString();
+
+        // Create output file name with _LLM suffix
+        String outputFileName = fileName.substring(0, fileName.lastIndexOf(".")) + "_LLM.java";
+        String outputFilePath = directory + File.separator + outputFileName;
+
         CompilationUnit cu = new JavaParser().parse(Files.readString(path)).getResult().orElseThrow();
 
         // Enable lexical preservation to maintain formatting
@@ -60,6 +73,12 @@ public class TestEnhancer {
         // Find the class
         ClassOrInterfaceDeclaration testClass = cu.findFirst(ClassOrInterfaceDeclaration.class)
                 .orElseThrow(() -> new RuntimeException("No class found in file"));
+
+        String originalClassName = testClass.getNameAsString();
+        String newClassName = originalClassName + "_LLM";
+
+        // Rename the class
+        testClass.setName(newClassName);
 
         // Extract the class under test (if available)
         String classUnderTest = inferClassUnderTest(testClass);
@@ -77,6 +96,7 @@ public class TestEnhancer {
         try (FileWriter writer = new FileWriter(outputFilePath)) {
             writer.write(LexicalPreservingPrinter.print(cu));
         }
+        return outputFilePath;
     }
 
     private static String inferClassUnderTest(ClassOrInterfaceDeclaration testClass) {
@@ -122,7 +142,7 @@ public class TestEnhancer {
                                     Expression scope = methodCall.getScope().get();
                                     String methodSignature = scope + "." + methodCall.getNameAsString() +
                                             "(" + String.join(", ", methodCall.getArguments().stream()
-                                            .map(Object::toString).toList()) + ")";
+                                            .map(Object::toString).collect(Collectors.toList())) + ")";
                                     signatures.add(methodSignature);
                                 }
                             });
@@ -136,7 +156,7 @@ public class TestEnhancer {
         List<MethodDeclaration> parameterizedTests = testClass.getMethods().stream()
                 .filter(m -> m.getAnnotations().stream()
                         .anyMatch(a -> a.getNameAsString().equals("ParameterizedTest")))
-                .toList();
+                .collect(Collectors.toList());
 
         for (MethodDeclaration paramTest : parameterizedTests) {
             // Find the associated provider method
@@ -164,17 +184,18 @@ public class TestEnhancer {
         // Get parameter information
         List<String> paramTypes = paramTest.getParameters().stream()
                 .map(p -> p.getType().asString())
-                .toList();
+                .collect(Collectors.toList());
         List<String> paramNames = paramTest.getParameters().stream()
                 .map(p -> p.getNameAsString())
-                .toList();
+                .collect(Collectors.toList());
 
         // Prepare prompt for Claude to suggest additional edge cases
         String prompt = "I have a parameterized test provider method that currently contains these parameter sets:\n\n" +
                 methodBody + "\n\n" +
                 "The test method has these parameters: " +
-                String.join(", ", paramTypes.stream().map((t, i) -> t + " " + paramNames.get(i))
-                        .toList()) + "\n\n" +
+                IntStream.range(0, paramTypes.size())
+                        .mapToObj(i -> paramTypes.get(i) + " " + paramNames.get(i))
+                        .collect(Collectors.joining(", ")) + "\n\n" +
                 "The test is for " + classUnderTest +
                 (methodSignatures.isEmpty() ? "" : " testing these methods:\n" +
                         String.join("\n", methodSignatures)) + "\n\n" +
@@ -184,7 +205,7 @@ public class TestEnhancer {
                 "arguments(value3, value4)";
 
         // Call Claude API to get suggestions
-        String claudeResponse = callClaudeAPI(prompt);
+        String claudeResponse = callChatGPT(prompt);
 
         // Extract the suggested arguments calls
         List<String> newArgumentCalls = extractArgumentCalls(claudeResponse);
@@ -236,16 +257,16 @@ public class TestEnhancer {
         // Get current parameter information
         List<String> currentParamTypes = paramTest.getParameters().stream()
                 .map(p -> p.getType().asString())
-                .toList();
+                .collect(Collectors.toList());
         List<String> currentParamNames = paramTest.getParameters().stream()
                 .map(p -> p.getNameAsString())
-                .toList();
+                .collect(Collectors.toList());
 
         // Prepare prompt for Claude to suggest better parameter names
         String prompt = "I have a parameterized test method with these parameters:\n\n" +
-                String.join(", ", currentParamTypes.stream()
-                        .map((t, i) -> t + " " + currentParamNames.get(i))
-                        .toList()) + "\n\n" +
+                IntStream.range(0, currentParamTypes.size())
+                        .mapToObj(i -> currentParamTypes.get(i) + " " + currentParamNames.get(i))
+                        .collect(Collectors.joining(", ")) + "\n\n" +
                 "The test is for " + classUnderTest +
                 (methodSignatures.isEmpty() ? "" : " testing these methods:\n" +
                         String.join("\n", methodSignatures)) + "\n\n" +
@@ -253,7 +274,7 @@ public class TestEnhancer {
                 "Return ONLY a comma-separated list of new parameter names without types or explanations.";
 
         // Call Claude API to get suggestions
-        String claudeResponse = callClaudeAPI(prompt);
+        String claudeResponse = callChatGPT(prompt);
 
         // Extract the suggested parameter names
         List<String> newParamNames = extractParameterNames(claudeResponse);
@@ -263,6 +284,26 @@ public class TestEnhancer {
             for (int i = 0; i < newParamNames.size(); i++) {
                 paramTest.getParameter(i).setName(newParamNames.get(i));
             }
+        }
+
+        // Replace all occurrences of old parameter names with new ones in the method body
+        if (paramTest.getBody().isPresent()) {
+            String methodBody = paramTest.getBody().get().toString();
+
+            // Replace each old parameter name with the new one
+            for (int i = 0; i < currentParamNames.size(); i++) {
+                String oldName = currentParamNames.get(i);
+                String newName = newParamNames.get(i);
+
+                // Use regex pattern that matches whole words only to avoid partial matches
+                Pattern pattern = Pattern.compile("\\b" + oldName + "\\b");
+                Matcher matcher = pattern.matcher(methodBody);
+                methodBody = matcher.replaceAll(newName);
+            }
+
+            // Parse the updated method body and replace the original
+            BlockStmt newBody = new JavaParser().parseBlock(methodBody).getResult().orElseThrow();
+            paramTest.setBody(newBody);
         }
     }
 
@@ -274,7 +315,7 @@ public class TestEnhancer {
         return List.of(cleanResponse.split(",")).stream()
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
-                .toList();
+                .collect(Collectors.toList());
     }
 
     private static void renameTestMethods(CompilationUnit cu, ClassOrInterfaceDeclaration testClass,
@@ -284,7 +325,7 @@ public class TestEnhancer {
                 .filter(m -> m.getAnnotations().stream()
                         .anyMatch(a -> a.getNameAsString().equals("Test") ||
                                 a.getNameAsString().equals("ParameterizedTest")))
-                .toList();
+                .collect(Collectors.toList());
 
         // Batch process test methods to reduce API calls
         int batchSize = 5;
@@ -292,16 +333,16 @@ public class TestEnhancer {
             int end = Math.min(i + batchSize, testMethods.size());
             List<MethodDeclaration> batch = testMethods.subList(i, end);
 
-            renameTestMethodBatch(batch, classUnderTest, methodSignatures);
+            renameTestMethodBatch(batch, classUnderTest, methodSignatures, testClass);
         }
     }
 
     private static void renameTestMethodBatch(List<MethodDeclaration> testMethods, String classUnderTest,
-                                              List<String> methodSignatures) throws Exception {
+                                              List<String> methodSignatures, ClassOrInterfaceDeclaration testClass) throws Exception {
         // Create a map of current method names
         List<String> currentNames = testMethods.stream()
                 .map(MethodDeclaration::getNameAsString)
-                .toList();
+                .collect(Collectors.toList());
 
         // Create batch method contents for context
         StringBuilder methodContextBuilder = new StringBuilder();
@@ -322,7 +363,7 @@ public class TestEnhancer {
                 "Make sure names follow Java method naming conventions and start with 'test'.";
 
         // Call Claude API
-        String claudeResponse = callClaudeAPI(prompt);
+        String claudeResponse = callChatGPT(prompt);
 
         // Extract the JSON array of new names
         List<String> newNames = extractJsonArray(claudeResponse);
@@ -340,8 +381,9 @@ public class TestEnhancer {
                 method.setName(newName);
 
                 // If this is a parameterized test, also rename its provider method
+                final String oldName = currentNames.get(i);
                 testClass.getMethods().stream()
-                        .filter(m -> m.getNameAsString().equals(currentNames.get(i) + "Provider"))
+                        .filter(m -> m.getNameAsString().equals(oldName + "Provider"))
                         .findFirst()
                         .ifPresent(providerMethod -> providerMethod.setName(newName + "Provider"));
             }
@@ -393,6 +435,16 @@ public class TestEnhancer {
         return result;
     }
 
+    private static String callChatGPT(String prompt) throws Exception {
+        System.out.println(prompt);
+        ChatLanguageModel model = OpenAiChatModel.builder()
+                .apiKey(ApiKeys.OPENAI_API_KEY)
+                .modelName("gpt-4o-mini")
+                .build();
+        String result = model.generate(prompt);
+        System.out.println(result);
+        return result;
+    }
     private static String callClaudeAPI(String prompt) throws Exception {
         HttpClient client = HttpClient.newHttpClient();
 

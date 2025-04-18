@@ -31,7 +31,7 @@ enum StatementType {
     POSTFIX_DECREMENT,
     PREFIX_INCREMENT,
     PREFIX_DECREMENT,
-    ARRAY_TYPE, ARRAY_INITIALIZER_EXPR, BOOLEAN_LITERAL, FOR_STMT, IF_STMT, TRY_STMT, CATCH_CLAUSE, NULL_LITERAL, THROW_STMT, RETURN_STMT, SWITCH_STMT, SWITCH_ENTRY, LOCAL_CLASS_DECLARATION, LAMBDA_EXPR, CONDITIONAL_EXPR, ENCLOSED_EXPR, INSTANCEOF_EXPR, THIS_EXPR, SUPER_EXPR, CLASS_EXPR, TYPE_EXPR, MARKER_ANNOTATION, SINGLE_MEMBER_ANNOTATION, NORMAL_ANNOTATION, BREAK_STMT, CONTINUE_STMT, ASSERT_STMT, METHOD_REFERENCE, ARRAY_CREATION_EXPR, ARRAY_ACCESS_EXPR, CAST_EXPR, BLOCK_STMT, WHILE_STMT, PARAMETER, ARRAY_CREATION_LEVEL, ASSIGN_EXPR, WILDCARD_TYPE, FOR_EACH_STMT, METHOD_DECLARATION, FIELD_DECLARATION, UNKNOWN_TYPE, NAME, VOID_TYPE,
+    ARRAY_TYPE, ARRAY_INITIALIZER_EXPR, BOOLEAN_LITERAL, FOR_STMT, IF_STMT, TRY_STMT, CATCH_CLAUSE, NULL_LITERAL, THROW_STMT, RETURN_STMT, SWITCH_STMT, SWITCH_ENTRY, LOCAL_CLASS_DECLARATION, LAMBDA_EXPR, CONDITIONAL_EXPR, ENCLOSED_EXPR, INSTANCEOF_EXPR, THIS_EXPR, SUPER_EXPR, CLASS_EXPR, TYPE_EXPR, MARKER_ANNOTATION, SINGLE_MEMBER_ANNOTATION, NORMAL_ANNOTATION, BREAK_STMT, CONTINUE_STMT, ASSERT_STMT, METHOD_REFERENCE, ARRAY_CREATION_EXPR, ARRAY_ACCESS_EXPR, CAST_EXPR, BLOCK_STMT, WHILE_STMT, PARAMETER, ARRAY_CREATION_LEVEL, ASSIGN_EXPR, WILDCARD_TYPE, FOR_EACH_STMT, METHOD_DECLARATION, FIELD_DECLARATION, UNKNOWN_TYPE, NAME, VOID_TYPE, VAR_TYPE
 }
 public class SlicingUtils {
     private HashMap<String, ArrayList<String>> variableMap = new HashMap<String, ArrayList<String>>(); // key: variable name, value: variable type & variable value
@@ -677,8 +677,18 @@ public class SlicingUtils {
                     stmtNode.type = StatementType.VOID_TYPE;
                     stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
                 }
-            }
-            else {
+            } else if (stmt instanceof VarType) {
+                VarType varType = ((VarType) stmt).clone();
+                if (varType.getChildNodes().size() > 0) {
+                    NodeList<Node> childNodes = new NodeList<>();
+                    int varTypeSize = varType.getChildNodes().size();
+                    for (int i = 0; i < varTypeSize; i++) {
+                        childNodes.add(varType.getChildNodes().get(i).clone());
+                    }
+                    stmtNode.type = StatementType.VAR_TYPE;
+                    stmtNode.children = createTrieFromStatementsNew(childNodes, hardcodedMap, valueSets);
+                }
+            } else {
                 throw new IllegalStateException("Unexpected value: " + stmt);
             }
 

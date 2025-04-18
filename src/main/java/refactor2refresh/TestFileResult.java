@@ -11,7 +11,7 @@ public class TestFileResult {
     int totalConsideredTests;
     int pastaCount;
     double pastaPercentage;
-    public Map<String, Integer> testMethodComponents; // # Separable components of test methods
+    public Map<String, Integer> independentLogicsInTest; // # Separable components of test methods
     List<String> listPastaTests; // # List of test methods which has pasta
 
     TestFileResult(String filePath, int totalTests, int totalConsideredTests, int pastaCount, double pastaPercentage) {
@@ -20,7 +20,7 @@ public class TestFileResult {
         this.totalConsideredTests = totalConsideredTests;
         this.pastaCount = pastaCount;
         this.pastaPercentage = pastaPercentage;
-        this.testMethodComponents = new HashMap<>();
+        this.independentLogicsInTest = new HashMap<>();
         this.listPastaTests = new ArrayList<String>();
     }
 }

@@ -728,6 +728,232 @@ public class Refactor2Refresh {
         return false;
     }
 
+    private static void performSlicingDelete(MethodDeclaration method, MethodCallExpr assertion, Map<String, Set<String>> beforeMethodDependencies) {
+        // input method is an atomized test, with only one assertion and all the lines after it removed
+
+        // Collect variables used in the assertion
+        Set<String> requiredVariables = getVariablesUsedInAssertion(assertion);
+
+        // Add the main object being asserted on to required variables
+        assertion.getScope().ifPresent(scope -> {
+            if (scope instanceof MethodCallExpr) {
+                MethodCallExpr methodScope = (MethodCallExpr) scope;
+                methodScope.getScope().ifPresent(innerScope -> {
+                    requiredVariables.add(innerScope.toString());
+                });
+            }
+        });
+
+        // Track method calls on required objects
+        Set<String> requiredObjectMethodCalls = new HashSet<>();
+
+        // Identify method calls on required objects in the assertion
+        findObjectMethodCalls(assertion, requiredVariables, requiredObjectMethodCalls);
+
+        // Expand required variables based on beforeMethodDependencies
+        Set<String> expandedRequiredVariables = expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies);
+
+        // Process once to identify all control objects
+        Set<String> controlObjects = new HashSet<>(requiredVariables);
+        List<Statement> statements = method.getBody().orElseThrow().getStatements();
+        for (Statement stmt : statements) {
+            if (stmt.isExpressionStmt()) {
+                ExpressionStmt exprStmt = stmt.asExpressionStmt();
+                Expression expr = exprStmt.getExpression();
+
+                // Identify assignments to control objects
+                if (expr.isAssignExpr()) {
+                    AssignExpr assignExpr = expr.asAssignExpr();
+                    String target = assignExpr.getTarget().toString();
+                    if (expandedRequiredVariables.contains(target)) {
+                        // If this is a reassignment of a control object, add it
+                        controlObjects.add(target);
+                    }
+                }
+            }
+        }
+
+        // Iterate over statements in reverse order to determine which ones to keep
+        Set<Statement> statementsToKeep = new HashSet<>();
+        for (int i = statements.size() - 1; i >= 0; i--) {
+            Statement stmt = statements.get(i);
+            boolean keepStatement = false;
+
+            // Check if the statement is an expression statement
+            if (stmt.isExpressionStmt()) {
+                ExpressionStmt exprStmt = stmt.asExpressionStmt();
+                Expression expr = exprStmt.getExpression();
+
+                // Check if the statement involves a method call on a required object
+                if (expr.isMethodCallExpr()) {
+                    MethodCallExpr methodCallExpr = expr.asMethodCallExpr();
+
+                    // If this is the assertion, keep it
+                    if (methodCallExpr.equals(assertion)) {
+                        keepStatement = true;
+                    }
+                    // Check if method is called on a control object
+                    else if (methodCallExpr.getScope().isPresent()) {
+                        String scopeStr = methodCallExpr.getScope().get().toString();
+                        String methodName = methodCallExpr.getNameAsString();
+
+                        // Keep methods that operate on control objects or have control objects as arguments
+                        if (controlObjects.contains(scopeStr) ||
+                                methodCallExpr.getArguments().stream().anyMatch(arg ->
+                                        getVariablesUsedInExpression(arg).stream().anyMatch(controlObjects::contains))) {
+                            keepStatement = true;
+                            // Add all variables used in the method call
+                            Set<String> newVars = getVariablesUsedInExpression(methodCallExpr);
+                            expandedRequiredVariables.addAll(newVars);
+                            expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(newVars, beforeMethodDependencies));
+                        }
+                        // Keep if it calls a method on a required object or uses a required variable
+                        else if (checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls) ||
+                                methodCallExpr.getArguments().stream().anyMatch(arg ->
+                                        getVariablesUsedInExpression(arg).stream().anyMatch(expandedRequiredVariables::contains))) {
+                            keepStatement = true;
+                            // Add all variables used in the method call
+                            Set<String> newVars = getVariablesUsedInExpression(methodCallExpr);
+                            expandedRequiredVariables.addAll(newVars);
+                            expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(newVars, beforeMethodDependencies));
+                        }
+                    } else if(methodCallExpr.getArguments().size() > 0) {
+//                        for(int j = 0; j < methodCallExpr.getArguments().size(); j++) {
+//                            Expression arg = methodCallExpr.getArgument(j);
+//                            Set<String> argVars = getVariablesUsedInExpression(arg);
+//                            if (argVars.stream().anyMatch(expandedRequiredVariables::contains)) {
+//                                keepStatement = true;
+//                                expandedRequiredVariables.addAll(argVars);
+//                                expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(argVars, beforeMethodDependencies));
+//                                break;
+//                            }
+//                        }
+                    }
+                }
+
+                // If the expression is an assignment, check the variable it defines
+                if (expr.isAssignExpr()) {
+                    AssignExpr assignExpr = expr.asAssignExpr();
+                    String varName = assignExpr.getTarget().toString();
+
+                    // Keep if it defines a required variable
+                    if (expandedRequiredVariables.contains(varName)) {
+                        keepStatement = true;
+                        expandedRequiredVariables.addAll(getVariablesUsedInExpression(assignExpr.getValue()));
+                        // Add expanded dependencies
+                        expandedRequiredVariables.addAll(
+                                expandVariablesUsingBeforeDependencies(
+                                        getVariablesUsedInExpression(assignExpr.getValue()),
+                                        beforeMethodDependencies
+                                )
+                        );
+                    }
+                    // Or if any method within the assignment is relevant
+                    else {
+                        List<MethodCallExpr> methodCallExprs = assignExpr.findAll(MethodCallExpr.class);
+                        boolean anyMethodRelevant = methodCallExprs.stream()
+                                .anyMatch(methodCallExpr -> {
+                                    if (checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls)) {
+                                        return true;
+                                    }
+                                    // Also check if method modifies state of a control object
+                                    if (methodCallExpr.getScope().isPresent()) {
+                                        String scope = methodCallExpr.getScope().get().toString();
+                                        String methodName = methodCallExpr.getNameAsString();
+                                        return controlObjects.contains(scope);
+                                    }
+                                    return false;
+                                });
+
+                        if (anyMethodRelevant) {
+                            keepStatement = true;
+                            // Add all variables
+                            Set<String> newVars = getVariablesUsedInExpression(assignExpr.getValue());
+                            expandedRequiredVariables.addAll(newVars);
+                            expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(newVars, beforeMethodDependencies));
+                        }
+                    }
+                }
+                // Handle variable declarations
+                else if (expr.isVariableDeclarationExpr()) {
+                    VariableDeclarationExpr varDeclExpr = expr.asVariableDeclarationExpr();
+
+                    // Check each variable in the declaration
+                    for (VariableDeclarator var : varDeclExpr.getVariables()) {
+                        String varName = var.getNameAsString();
+
+                        // Keep if it defines a required variable
+                        if (expandedRequiredVariables.contains(varName)) {
+                            keepStatement = true;
+                            var.getInitializer().ifPresent(initializer -> {
+                                Set<String> newVars = getVariablesUsedInExpression(initializer);
+                                expandedRequiredVariables.addAll(newVars);
+                                expandedRequiredVariables.addAll(
+                                        expandVariablesUsingBeforeDependencies(newVars, beforeMethodDependencies)
+                                );
+                            });
+                        }
+                        // Or if any method within is relevant
+                        else {
+                            boolean anyMethodRelevant = var.getInitializer()
+                                    .map(initializer -> initializer.findAll(MethodCallExpr.class).stream()
+                                            .anyMatch(methodCallExpr -> {
+                                                if (checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls)) {
+                                                    return true;
+                                                }
+                                                // Check if method is on a control object or has control objects as arguments
+                                                if (methodCallExpr.getScope().isPresent()) {
+                                                    String scope = methodCallExpr.getScope().get().toString();
+                                                    return controlObjects.contains(scope) ||
+                                                            methodCallExpr.getArguments().stream().anyMatch(arg ->
+                                                                    getVariablesUsedInExpression(arg).stream().anyMatch(controlObjects::contains));
+                                                }
+                                                return false;
+                                            }))
+                                    .orElse(false);
+
+                            if (anyMethodRelevant) {
+                                keepStatement = true;
+                                var.getInitializer().ifPresent(initializer -> {
+                                    Set<String> newVars = getVariablesUsedInExpression(initializer);
+                                    expandedRequiredVariables.addAll(newVars);
+                                    expandedRequiredVariables.addAll(
+                                            expandVariablesUsingBeforeDependencies(newVars, beforeMethodDependencies)
+                                    );
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Keep the statement if flagged, otherwise remove it
+            if (keepStatement) {
+                statementsToKeep.add(stmt);
+            } else {
+                stmt.remove();
+            }
+        }
+    }
+
+    private static boolean checkIfMethodArgumentsHaveRequiredObjects(
+            MethodCallExpr methodCallExpr,
+            Set<String> expandedRequiredVariables,
+            Map<String, Set<String>> beforeMethodDependencies
+    ) {
+
+        for(int j = 0; j < methodCallExpr.getArguments().size(); j++) {
+            Expression arg = methodCallExpr.getArgument(j);
+            Set<String> argVars = getVariablesUsedInExpression(arg);
+            if (argVars.stream().anyMatch(expandedRequiredVariables::contains)) {
+                expandedRequiredVariables.addAll(argVars);
+                expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(argVars, beforeMethodDependencies));
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void performSlicing(MethodDeclaration method, MethodCallExpr assertion, Map<String, Set<String>> beforeMethodDependencies) {
         // input method is an atomized test, with only one assertion and all the lines after it removed
 
@@ -760,8 +986,9 @@ public class Refactor2Refresh {
                     // If any method call is on a required object or uses a required variable
                     if(methodCallExpr.equals(assertion)) {
                         continue;
-                    }
-                    else if (checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls)) {
+                    } else if(checkIfMethodArgumentsHaveRequiredObjects(methodCallExpr, expandedRequiredVariables, beforeMethodDependencies)) {
+                        continue;
+                    } else if (checkMethodExpressionsAndRequiredObjects(methodCallExpr, requiredObjectMethodCalls)) {
                         // Add all variables used in the method call and expand dependencies
                         expandedRequiredVariables.addAll(getVariablesUsedInExpression(methodCallExpr));
                         expandedRequiredVariables.addAll(expandVariablesUsingBeforeDependencies(requiredVariables, beforeMethodDependencies));
@@ -895,54 +1122,20 @@ public class Refactor2Refresh {
         return false;
     }
 
-    private static void performSlicingOld(MethodDeclaration method, MethodCallExpr assertion) {
-        // Collect variables used in the assertion
-        Set<String> requiredVariables = getVariablesUsedInAssertion(assertion);
-
-        // Iterate over statements in reverse order to determine which ones to keep
-        List<Statement> statements = method.getBody().orElseThrow().getStatements();
-        for (int i = statements.size() - 1; i >= 0; i--) {
-            Statement stmt = statements.get(i);
-
-            // Check if the statement is an expression that declares or assigns a variable
-            if (stmt.isExpressionStmt()) {
-                ExpressionStmt exprStmt = stmt.asExpressionStmt();
-                Expression expr = exprStmt.getExpression();
-
-                // If the expression is an assignment, check the variable it defines
-                if (expr.isAssignExpr()) {
-                    AssignExpr assignExpr = expr.asAssignExpr();
-                    String varName = assignExpr.getTarget().toString();
-
-                    // Retain the statement if it defines a required variable, and add new dependencies
-                    if (requiredVariables.contains(varName)) {
-                        requiredVariables.addAll(getVariablesUsedInExpression(assignExpr.getValue()));
-                    } else {
-                        // Remove the statement if it doesn't define a required variable
-                        stmt.remove();
-                    }
-                } else if (expr.isVariableDeclarationExpr()) {
-                    // Handle variable declarations
-                    expr.asVariableDeclarationExpr().getVariables().forEach(var -> {
-                        String varName = var.getNameAsString();
-
-                        // Retain the statement if it defines a required variable, and add new dependencies
-                        if (requiredVariables.contains(varName)) {
-                            requiredVariables.addAll(getVariablesUsedInExpression(var.getInitializer().orElse(null)));
-                        } else {
-                            // Remove the statement if it doesn't define a required variable
-                            stmt.remove();
-                        }
-                    });
-                }
-            }
-        }
-    }
-
     // Helper method to get all variables used in an assertion
+//    static Set<String> getVariablesUsedInAssertion(MethodCallExpr assertion) {
+//        Set<String> variables = new HashSet<>();
+//        assertion.getArguments().forEach(arg -> variables.addAll(getVariablesUsedInExpression(arg)));
+//        return variables;
+//    }
+
     static Set<String> getVariablesUsedInAssertion(MethodCallExpr assertion) {
         Set<String> variables = new HashSet<>();
         assertion.getArguments().forEach(arg -> variables.addAll(getVariablesUsedInExpression(arg)));
+
+        // Also include scope of the assertion itself (e.g., isAvailable part)
+        assertion.getScope().ifPresent(scope -> variables.addAll(getVariablesUsedInExpression(scope)));
+
         return variables;
     }
 
@@ -953,32 +1146,6 @@ public class Refactor2Refresh {
 
         expression.walk(NameExpr.class, nameExpr -> variables.add(nameExpr.getNameAsString()));
         return variables;
-    }
-
-    public static boolean hasIndependentTests(List<MethodDeclaration> purifiedTestsOfOriginalTest) {
-        for (int i = 0; i < purifiedTestsOfOriginalTest.size(); i++) {
-            MethodDeclaration test1 = purifiedTestsOfOriginalTest.get(i);
-            List<String> test1Lines = extractNonAssertionLines(test1);
-            List<String> test1Assertions = extractAssertionLines(test1);
-
-            for (int j = i + 1; j < purifiedTestsOfOriginalTest.size(); j++) {
-                MethodDeclaration test2 = purifiedTestsOfOriginalTest.get(j);
-                List<String> test2Lines = extractNonAssertionLines(test2);
-                List<String> test2Assertions = extractAssertionLines(test2);
-
-                if (!Collections.disjoint(test1Assertions, test2Assertions)) {
-//                    System.out.println("Tests are not independent due to common assertions: " +
-//                            test1.getNameAsString() + " and " + test2.getNameAsString());
-                    return false;
-                }
-
-                if (areTestsIndependent(test1Lines, test2Lines)) {
-//                    System.out.println("Independent tests found: " + test1.getNameAsString() + " and " + test2.getNameAsString());
-                    return true; // Found two independent tests
-                }
-            }
-        }
-        return false; // No independent tests found
     }
 
     public static boolean areTestsIndependent(List<String> test1Lines, List<String> test2Lines) {
@@ -1034,16 +1201,6 @@ public class Refactor2Refresh {
         lines.remove(0);
         lines.remove(lines.size() - 1);
         return lines;
-    }
-
-    private static boolean isSubset(List<String> smaller, List<String> larger) {
-        Set<String> largerSet = new HashSet<>(larger);
-        for (String line : smaller) {
-            if (!largerSet.contains(line)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static Map<String, Set<String>> extractBeforeMethodDependencies(ClassOrInterfaceDeclaration testClass) {
@@ -1301,6 +1458,16 @@ public class Refactor2Refresh {
 
     public static boolean hasComplexControlStructures(MethodDeclaration method) {
         try {
+            // Check for Thread.sleep calls
+            for (MethodCallExpr methodCall : method.findAll(MethodCallExpr.class)) {
+                if (methodCall.getNameAsString().equals("sleep")) {
+                    // Check if it's specifically Thread.sleep
+                    if (methodCall.getScope().isPresent() &&
+                            methodCall.getScope().get().toString().equals("Thread")) {
+                        return true;
+                    }
+                }
+            }
 
             // Check for Mockito-style mocking with when().thenReturn() pattern
             for (MethodCallExpr methodCall : method.findAll(MethodCallExpr.class)) {
@@ -1522,6 +1689,44 @@ public class Refactor2Refresh {
         return false;
     }
 
+    // Helper method to check if a method call is part of an assertion chain
+    private static boolean isAssertionMethodChain(MethodCallExpr methodCall) {
+        // Check if this method starts with "assert"
+        if (methodCall.getNameAsString().startsWith("assert")) {
+            return true;
+        }
+
+        // Check if the scope (parent method call) is an assertion
+        if (methodCall.getScope().isPresent() && methodCall.getScope().get() instanceof MethodCallExpr) {
+            return isAssertionMethodChain((MethodCallExpr) methodCall.getScope().get());
+        }
+
+        return false;
+    }
+
+    public static List<MethodCallExpr> extractAssertions(MethodDeclaration testMethod) {
+        List<Statement> assertionStatements = testMethod.findAll(ExpressionStmt.class)
+                .stream()
+                .filter(stmt -> {
+                    Expression expr = stmt.getExpression();
+                    // Look for method call expressions that either:
+                    // 1. Start with "assert" directly (like assertEquals())
+                    // 2. Are part of a method chain that starts with "assert" (like assertThat().isFalse())
+                    if (expr instanceof MethodCallExpr) {
+                        MethodCallExpr methodCall = (MethodCallExpr) expr;
+                        return isAssertionMethodChain(methodCall);
+                    }
+                    return false;
+                })
+                .collect(Collectors.toList());
+        List<MethodCallExpr> assertions = assertionStatements.stream()
+                .map(stmt -> (ExpressionStmt) stmt)
+                .map(ExpressionStmt::getExpression)
+                .map(expr -> (MethodCallExpr) expr)
+                .collect(Collectors.toList());
+        return assertions;
+    }
+
     private static TestFileResult identifyAssertionPastas(String inputFilePath) throws IOException {
         System.out.println("Identifying assertion pastas in file: " + inputFilePath);
         // Parse the input Java test file
@@ -1564,10 +1769,11 @@ public class Refactor2Refresh {
                     AtomicInteger counter = new AtomicInteger(1);
                     List<MethodDeclaration> purifiedTestsOfOriginalTest = new ArrayList<>();
                     // Collect all assert statements for backward slicing
-                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
-                            .stream()
-                            .filter(call -> call.getNameAsString().startsWith("assert"))
-                            .collect(Collectors.toList());
+//                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
+//                            .stream()
+//                            .filter(call -> call.getNameAsString().startsWith("assert"))
+//                            .collect(Collectors.toList());
+                    List<MethodCallExpr> assertions = extractAssertions(testMethod);
 
                     HashMap<String, NodeList<Node>> statementNodesListMap = new HashMap<>();
 
@@ -1623,7 +1829,7 @@ public class Refactor2Refresh {
                     if (separableComponents > 1) {
                         System.out.println(testMethod.getNameAsString() + ":");
                         System.out.println(separableComponents + ", ");
-                        result.testMethodComponents.put(testMethod.getNameAsString(), separableComponents);
+                        result.independentLogicsInTest.put(testMethod.getNameAsString(), separableComponents);
                         try {
                             result.listPastaTests.add(testMethod.getNameAsString());
                         } catch (Exception e) {
@@ -1657,36 +1863,6 @@ public class Refactor2Refresh {
                 !filePath.contains("/build/");    // Exclude build directories
     }
 
-    private static TestFileResult parseOutput(String output, String filePath) {
-        try {
-            // Split output into lines
-            String[] lines = output.split("\n");
-
-            // Extract metrics from the output
-            int totalTests = 0;
-            int totalConsideredTests = 0;
-            int pastaCount = 0;
-            double pastaPercentage = 0.0;
-
-            for (String line : lines) {
-                if (line.startsWith("Total tests:")) {
-                    totalTests = Integer.parseInt(line.split(":")[1].trim());
-                } else if(line.startsWith("Total Considered tests")) {
-                    totalConsideredTests = Integer.parseInt(line.split(":")[1].trim());
-                } else if (line.startsWith("Assertion Pasta count:")) {
-                    pastaCount = Integer.parseInt(line.split(":")[1].trim());
-                } else if (line.startsWith("Assertion Pasta Percentage:")) {
-                    pastaPercentage = Double.parseDouble(line.split(":")[1].trim().replace("%", ""));
-                }
-            }
-
-            return new TestFileResult(filePath, totalTests, totalConsideredTests, pastaCount, pastaPercentage);
-        } catch (Exception e) {
-            System.err.println("Error parsing output for file: " + filePath);
-            return null;
-        }
-    }
-
     public static String getLastFolderName(String repositoryPath) {
         Path path = Paths.get(repositoryPath);
         return path.getFileName().toString(); // Extracts the last folder name
@@ -1694,7 +1870,7 @@ public class Refactor2Refresh {
 
     private static void generateReportAssertionPasta(List<TestFileResult> results, String repositoryPath) {
         try {
-            String reportPath = Paths.get("/Users/monilnarang/Documents/Research Evaluations/Apr5", getLastFolderName(repositoryPath) + ".md").toString();
+            String reportPath = Paths.get("/Users/monilnarang/Documents/Research Evaluations/Apr9", getLastFolderName(repositoryPath) + ".md").toString();
             try (PrintWriter writer = new PrintWriter(new FileWriter(reportPath))) {
                 // Write report header
                 writer.println("# Assertion Pasta Analysis Report");
@@ -1713,7 +1889,7 @@ public class Refactor2Refresh {
 
                 Map<Integer, Integer> separableComponentFrequency = new HashMap<>();
                 for (TestFileResult result : results) {
-                    for (int components : result.testMethodComponents.values()) {
+                    for (int components : result.independentLogicsInTest.values()) {
                         separableComponentFrequency.put(components, separableComponentFrequency.getOrDefault(components, 0) + 1);
                     }
                 }
@@ -1751,7 +1927,7 @@ public class Refactor2Refresh {
                                     .toString();
                             // Format test method details
                             StringBuilder testMethodDetails = new StringBuilder();
-                            result.testMethodComponents.forEach((methodName, components) -> {
+                            result.independentLogicsInTest.forEach((methodName, components) -> {
                                 testMethodDetails.append(methodName).append(" (").append(components).append("), ");
                             });
 
@@ -1902,10 +2078,11 @@ public class Refactor2Refresh {
                     AtomicInteger counter = new AtomicInteger(1);
                     List<MethodDeclaration> purifiedTestsOfOriginalTest = new ArrayList<>();
                     // Collect all assert statements for backward slicing
-                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
-                            .stream()
-                            .filter(call -> call.getNameAsString().startsWith("assert"))
-                            .collect(Collectors.toList());
+//                    List<MethodCallExpr> assertions = testMethod.findAll(MethodCallExpr.class)
+//                            .stream()
+//                            .filter(call -> call.getNameAsString().startsWith("assert"))
+//                            .collect(Collectors.toList());
+                    List<MethodCallExpr> assertions = extractAssertions(testMethod);
 
                     HashMap<String, NodeList<Node>> statementNodesListMap = new HashMap<>();
 
@@ -2017,16 +2194,6 @@ public class Refactor2Refresh {
         return clusteredTests;
     }
 
-    // Helper method to extract all lines from a test method
-    private static List<String> extractAllLines(MethodDeclaration test) {
-        List<String> lines = new ArrayList<>();
-        // Implementation depends on how your test methods are structured
-        // You'll need to extract both assertion and non-assertion lines
-        lines.addAll(extractNonAssertionLines(test));
-        lines.addAll(extractAssertionLines(test));
-        return lines;
-    }
-
     // Helper method to update the body of a test method
     private static void updateTestBody(MethodDeclaration test, List<String> newLines) {
         // Implementation depends on your AST manipulation library
@@ -2057,6 +2224,10 @@ public class Refactor2Refresh {
         int count = 0;
         for (List<UnitTest> group : similarTestGroups) {
             if (group.size() > 1) {
+                // print group
+                System.out.println("Potential PUTs Group: " + count + ": " + group.size() + " tests");
+                for(int i=0;i<group.size();i++)
+                    System.out.println(group.get(i).Name + " ");
                 count++;
             }
         }
@@ -2116,7 +2287,7 @@ public class Refactor2Refresh {
                 System.out.println("ERROR?: Puts should be created: " + purifiedOutputFilePath);
             }
             else {
-                System.out.println(newPUTs.size() + " new PUTs created for file: " + purifiedOutputFilePath);
+                System.out.println(newPUTs.size()/2 + " new PUTs created for file: " + purifiedOutputFilePath);
                 totalNewPUTsCreated = totalNewPUTsCreated + newPUTs.size()/2;
                 createParameterizedTestFile(purifiedOutputFilePath, newPUTs, extractTestMethodsToExclude(similarTestGroups));
             }
@@ -2125,6 +2296,125 @@ public class Refactor2Refresh {
 //        System.out.println("Total new separated tests created: " + totalNewSeparatedTestsCreated);
         return new ResultCreateRefreshedTestFilesInSandbox(totalNewSeparatedTestsCreated, totalNewPUTsCreated, totalPotentialPuts);
     }
+
+    /**
+     * Processes multiple repositories to fix assertion pasta and generates a Markdown report for each.
+     *
+     * @param commaSeparatedPaths A string of comma-separated paths to Java repositories
+     * @throws IOException If an I/O error occurs
+     */
+    public static void fixAssertionPastaInMultipleRepositoriesAndGenerateReports(String commaSeparatedPaths) throws IOException {
+            String reportOutputDir = "/Users/monilnarang/Documents/Research Evaluations/Apr9";
+            // Create output directory if it doesn't exist
+            File outputDir = new File(reportOutputDir);
+            if (!outputDir.exists()) {
+                outputDir.mkdirs();
+            }
+
+            // Split the input string by commas
+            String[] paths = commaSeparatedPaths.split(",");
+
+            // Create a StringBuilder to collect all reports
+            StringBuilder allReportsBuilder = new StringBuilder();
+            allReportsBuilder.append("# Assertion Pasta Fix Reports\n\n");
+
+            // Track overall statistics
+            int totalTestSplitted = 0;
+            int totalPotentialPuts = 0;
+            int totalNewPutsCreated = 0;
+
+            // Process each path
+            for (String path : paths) {
+                String trimmedPath = path.trim();
+                System.out.println("Processing repository: " + trimmedPath);
+
+                // Create a StringBuilder for the current report
+                StringBuilder reportBuilder = new StringBuilder();
+                reportBuilder.append("## Repository: ").append(trimmedPath).append("\n\n");
+
+                try {
+                    // Redirect System.out temporarily to capture the output
+                    PrintStream originalOut = System.out;
+                    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+                    PrintStream capturedOut = new PrintStream(outputStream);
+                    System.setOut(capturedOut);
+
+                    // Call the original method
+                    fixAssertionPastaInRepo(trimmedPath);
+
+                    // Restore the original System.out
+                    System.setOut(originalOut);
+
+                    // Get the captured output
+                    String capturedOutput = outputStream.toString();
+                    System.out.println(capturedOutput); // Print to console as well
+
+                    // Extract statistics from the captured output
+                    String[] lines = capturedOutput.split("\n");
+                    int potentialPuts = 0;
+                    int newPutsCreated = 0;
+
+                    for (String line : lines) {
+                        reportBuilder.append("- ").append(line).append("\n");
+
+                        if (line.startsWith("Total potential PUTs:")) {
+                            potentialPuts = Integer.parseInt(line.substring("Total potential PUTs:".length()).trim());
+                            totalPotentialPuts += potentialPuts;
+                        } else if (line.startsWith("Total new PUTs created:")) {
+                            newPutsCreated = Integer.parseInt(line.substring("Total new PUTs created:".length()).trim());
+                            totalNewPutsCreated += newPutsCreated;
+                        } else if (line.startsWith("Total new separated tests created:")) {
+                            totalTestSplitted += Integer.parseInt(line.substring("Total new separated tests created:".length()).trim());
+                        }
+                    }
+
+                    // Calculate PUT conversion percentage
+                    double putConversionPercentage = potentialPuts > 0 ?
+                            ((double) newPutsCreated / potentialPuts) * 100 : 0;
+
+                    reportBuilder.append("- PUT Conversion Rate: ")
+                            .append(String.format("%.2f%%", putConversionPercentage))
+                            .append("\n\n");
+                } catch (Exception e) {
+                    reportBuilder.append("### Error\n");
+                    reportBuilder.append("- Error processing repository: ").append(e.getMessage()).append("\n\n");
+                    System.err.println("Error processing repository " + trimmedPath + ": " + e.getMessage());
+                    e.printStackTrace();
+                }
+
+                // Write the individual report to a file
+                String safeFileName = trimmedPath.replaceAll("[^a-zA-Z0-9.-]", "_");
+                String reportFileName = outputDir.getPath() + File.separator + "assertion_pasta_report_" + safeFileName + ".md";
+                try (FileWriter writer = new FileWriter(reportFileName)) {
+                    writer.write(reportBuilder.toString());
+                }
+
+                System.out.println("Report generated: " + reportFileName);
+
+                // Add this report to the overall report
+                allReportsBuilder.append(reportBuilder);
+            }
+
+            // Calculate overall PUT conversion percentage
+            double overallPutConversionPercentage = totalPotentialPuts > 0 ?
+                    ((double) totalNewPutsCreated / totalPotentialPuts) * 100 : 0;
+
+            allReportsBuilder.append("## Summary\n\n");
+            allReportsBuilder.append("- Total tests splitted across all repositories: ").append(totalTestSplitted).append("\n");
+            allReportsBuilder.append("- Total potential PUTs across all repositories: ").append(totalPotentialPuts).append("\n");
+            allReportsBuilder.append("- Total new PUTs created across all repositories: ").append(totalNewPutsCreated).append("\n");
+            allReportsBuilder.append("- Overall PUT Conversion Rate: ")
+                    .append(String.format("%.2f%%", overallPutConversionPercentage))
+                    .append("\n");
+
+            // Write the combined report to a file
+            String allReportsFileName = outputDir.getPath() + File.separator + "all_assertion_pasta_reports.md";
+            try (FileWriter writer = new FileWriter(allReportsFileName)) {
+                writer.write(allReportsBuilder.toString());
+            }
+
+            System.out.println("Combined report generated: " + allReportsFileName);
+        }
 
     public static void fixAssertionPastaInRepo(String pathToJavaRepository) throws IOException {
         List<TestFileResult> results = getAssertionPastaResultsInRepo(pathToJavaRepository);
@@ -2260,13 +2550,22 @@ public class Refactor2Refresh {
                 detectAssertionPastaAndGenerateReport(file.trim()); // Trim spaces to avoid errors
             }
         }
+        else if (operation.equals("allReposFix")) {
+            fixAssertionPastaInMultipleRepositoriesAndGenerateReports(inputFile);
+        }
         else if (operation.equals("detectin")) {
             identifyAssertionPastas(inputFile);
         }
         else if (operation.equals("fixInRepo")) {
             fixAssertionPastaInRepo(inputFile);
-        }
-        else if (operation.equals("fixin")) {
+        } else if(operation.equals("fixinfile")) {
+            List<TestFileResult> clutters = new ArrayList<>();
+            clutters.add(identifyAssertionPastas(inputFile));
+            ResultCreateRefreshedTestFilesInSandbox result = createRefreshedTestFilesInSandbox(clutters);
+            System.out.println("Total new separated tests created: " + result.totalNewSeparatedTestsCreated);
+            System.out.println("Total potential PUTs: " + result.totalPotentialPuts);
+            System.out.println("Total new PUTs created: " + result.totalNewPUTsCreated);
+        } else if (operation.equals("fixin")) {
             if(args.length < 3) {
                 throw new IllegalArgumentException("Please provide the method name to fix as an argument.");
             }
