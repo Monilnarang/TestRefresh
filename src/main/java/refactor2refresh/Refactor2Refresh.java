@@ -34,6 +34,8 @@ import java.util.stream.Collectors;
 
 public class Refactor2Refresh {
 
+    public static HashMap<String, TestAnalytics> analyticsMap = new HashMap<>();
+    // key => TestClass#TestMethod
     public static int TotalRedundantTests = 0;
     public static int TotalNewPuts = 0;
     // Parameterizer
@@ -528,7 +530,7 @@ public class Refactor2Refresh {
 
                 // add parameters : replace hardcoded and add in signature
                 for (int i = 0; i < parameter_to_values_map.size(); i++) {
-                    ArrayList<LiteralExpr> values = parameter_to_values_map.get(i + 1); // TreeMap keys start from 1 in this example
+                    ArrayList<LiteralExpr> values = parameter_to_values_map.firstEntry().getValue(); // TreeMap keys start from 1 in this example
                     if (values != null && !values.isEmpty()) {
                         LiteralExpr initialValue = values.get(0);
                         String parameterName = "param" + (i + 1);
@@ -2228,6 +2230,28 @@ public class Refactor2Refresh {
         }
     }
 
+    private static boolean isChildOfTarget(Node node, Node targetNode) {
+        Node parent = node.getParentNode().orElse(null);
+        while (parent != null) {
+            if (parent.equals(targetNode)) {
+                return true;
+            }
+            parent = parent.getParentNode().orElse(null);
+        }
+        return false;
+    }
+    private static boolean anyChildIsAssert(MethodCallExpr call) {
+        for(Node child : call.getChildNodes()) {
+            if (child instanceof MethodCallExpr) {
+                MethodCallExpr childCall = (MethodCallExpr) child;
+                if (childCall.getNameAsString().startsWith("assert")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public static ResultSeparateIndependentAssertionClustersAndAddToClass separateIndependentAssertionClustersAndAddToClass(ClassOrInterfaceDeclaration originalClass, ClassOrInterfaceDeclaration newClass, TestFileResult result) {
         // separate independent assertion clusters from the original class and add to new class
         AtomicInteger newSeparatedTests = new AtomicInteger();
@@ -2256,9 +2280,12 @@ public class Refactor2Refresh {
                         purifiedMethod.setName(methodName);
 
                         // Remove all assertions except the current one
+                        // First, handle direct MethodCallExpr assertions
                         purifiedMethod.findAll(MethodCallExpr.class).forEach(call -> {
-                            if (call.getNameAsString().startsWith("assert") && !call.equals(assertStatement)) {
-                                call.getParentNode().ifPresent(Node::remove);
+                            if(call.getNameAsString().startsWith("assert") || anyChildIsAssert(call)) {
+                                if(!call.equals(assertStatement)){
+                                    call.getParentNode().ifPresent(Node::remove);
+                                }
                             }
                         });
 
@@ -2408,6 +2435,241 @@ public class Refactor2Refresh {
         }
 
     }
+
+    public static int extractTestLogicLineCount(CompilationUnit cu, String testName) {
+        // Find the method with the given test name
+        final int[] lineCount = {0};
+
+        // Visit all methods in the compilation unit
+        cu.findAll(MethodDeclaration.class).stream()
+                .filter(method -> method.getNameAsString().equals(testName))
+                .forEach(method -> {
+                    // Get the method body
+                    Optional<BlockStmt> bodyOpt = method.getBody();
+                    if (bodyOpt.isPresent()) {
+                        BlockStmt body = bodyOpt.get();
+
+                        // Get the statements in the method body
+                        NodeList<Statement> statements = body.getStatements();
+
+                        // Count the lines of code (excluding empty lines, comments, and brackets)
+                        for (Statement stmt : statements) {
+                            // Skip empty statements
+                            if (stmt.isEmptyStmt()) {
+                                continue;
+                            }
+
+                            // Convert statement to string and get its lines
+                            String stmtStr = stmt.toString();
+                            String[] lines = stmtStr.split("\n");
+
+                            // Process each line
+                            for (String line : lines) {
+                                line = line.trim();
+
+                                // Skip empty lines
+                                if (line.isEmpty()) {
+                                    continue;
+                                }
+
+                                // Skip lines with only opening or closing brackets
+                                if (line.equals("{") || line.equals("}")) {
+                                    continue;
+                                }
+
+                                // Skip comment lines
+                                if (line.startsWith("//") || line.startsWith("/*") || line.startsWith("*")) {
+                                    continue;
+                                }
+
+                                // Count this as a valid logic line
+                                lineCount[0]++;
+                            }
+                        }
+                    }
+                });
+
+        return lineCount[0];
+    }
+
+    public static String extractClassName(String path) {
+        if (path == null || path.isEmpty()) {
+            return null;
+        }
+
+        // Find the last '/' or '\' character
+        int lastSlashIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+
+        // Extract the filename with extension
+        String fileNameWithExtension = path.substring(lastSlashIndex + 1);
+
+        // Remove the .java extension if it exists
+        if (fileNameWithExtension.endsWith(".java")) {
+            return fileNameWithExtension.substring(0, fileNameWithExtension.length() - 5);
+        }
+
+        return fileNameWithExtension;
+    }
+
+    public static int extractTestLogicLineCountForSplittedTests(CompilationUnit cu, String testName) {
+        // Create a prefix to search for in method names
+        String methodPrefix = testName + "_";
+
+        // Track the total line count across all matching methods
+        final int[] totalLineCount = {0};
+
+        // Visit all methods in the compilation unit
+        cu.findAll(MethodDeclaration.class).stream()
+                .filter(method -> method.getNameAsString().startsWith(methodPrefix))
+                .forEach(method -> {
+                    // Get the method body
+                    Optional<BlockStmt> bodyOpt = method.getBody();
+                    if (bodyOpt.isPresent()) {
+                        BlockStmt body = bodyOpt.get();
+
+                        // Get the statements in the method body
+                        NodeList<Statement> statements = body.getStatements();
+
+                        // Count the lines of code (excluding empty lines, comments, and brackets)
+                        for (Statement stmt : statements) {
+                            // Skip empty statements
+                            if (stmt.isEmptyStmt()) {
+                                continue;
+                            }
+
+                            // Convert statement to string and get its lines
+                            String stmtStr = stmt.toString();
+                            String[] lines = stmtStr.split("\n");
+
+                            // Process each line
+                            for (String line : lines) {
+                                line = line.trim();
+
+                                // Skip empty lines
+                                if (line.isEmpty()) {
+                                    continue;
+                                }
+
+                                // Skip lines with only opening or closing brackets
+                                if (line.equals("{") || line.equals("}")) {
+                                    continue;
+                                }
+
+                                // Skip comment lines
+                                if (line.startsWith("//") || line.startsWith("/*") || line.startsWith("*")) {
+                                    continue;
+                                }
+
+                                // Count this as a valid logic line
+                                totalLineCount[0]++;
+                            }
+                        }
+                    }
+                });
+
+        return totalLineCount[0];
+    }
+
+    public static int extractDisjointAssertionCountForTest(CompilationUnit cu, String testName) {
+        // Create a prefix to search for in method names
+        String methodPrefix = testName + "_";
+
+        // Track the total line count across all matching methods
+        final int[] totalDisjointAssertions = {0};
+
+        // Visit all methods in the compilation unit
+        cu.findAll(MethodDeclaration.class).stream()
+                .filter(method -> method.getNameAsString().startsWith(methodPrefix))
+                .forEach(method -> {
+                    totalDisjointAssertions[0]++;
+                });
+
+        return totalDisjointAssertions[0];
+    }
+
+    public static List<String> extractPotentialPUTsOpportunity(List<List<UnitTest>> similarTestGroups) {
+        List<String> listOppos = new ArrayList<>();
+        for (List<UnitTest> group : similarTestGroups) {
+            if (group.size() > 1) {
+                for(int i=0;i<group.size();i++)
+                    listOppos.add(group.get(i).Name);
+            }
+        }
+        return listOppos;
+    }
+
+    public static void collectTestAnalyticsBeforePhaseI(TestFileResult testClassResult) throws FileNotFoundException {
+        String className = extractClassName(testClassResult.filePath);
+        CompilationUnit cu = configureJavaParserAndGetCompilationUnit(testClassResult.filePath);
+
+        for(String test : testClassResult.listPastaTests) {
+            String analyticsMethodKey = className + "#" + test;
+            analyticsMap.put(
+                    analyticsMethodKey, new TestAnalytics(
+                        className,
+                        test,
+                        testClassResult.independentLogicsInTest.get(test),
+                        extractTestLogicLineCount(cu, test)
+                    )
+            );
+        }
+
+        List<MethodDeclaration> methods = cu.findAll(MethodDeclaration.class);
+        for (MethodDeclaration method : methods) {
+            if (testClassResult.listPastaTests.contains(method.getNameAsString())) {
+                String analyticsMethodKey = className + "#" + method.getNameAsString();
+                List<MethodCallExpr> assertions = extractAssertions(method);
+                analyticsMap.get(analyticsMethodKey).assertionCount = assertions.size();
+            }
+        }
+    }
+
+
+    public static void collectTestAnalyticsAfterPhaseI(TestFileResult testClassResult, ResultCreateNewClassFileWithSplittedTests result) throws FileNotFoundException {
+        String className = extractClassName(testClassResult.filePath);
+        String purifiedOutputFilePath = result.newClassFilePath;
+        int totalNewSeparatedTestsCreated = result.newSeparatedTests;
+        CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedOutputFilePath);
+
+        for(String test: testClassResult.listPastaTests) {
+            String analyticsMethodKey = className + "#" + test;
+            analyticsMap.get(analyticsMethodKey).lineCountAfterP1 = extractTestLogicLineCountForSplittedTests(cu, test);
+            analyticsMap.get(analyticsMethodKey).disjointAssertionCount = extractDisjointAssertionCountForTest(cu, test);
+        }
+    }
+
+    public static void collectTestAnalyticsBeforePhaseII(TestFileResult testClassResult, List<List<UnitTest>> similarTestGroups) {
+        String className = extractClassName(testClassResult.filePath);
+        List<String> putsOpportunities = extractPotentialPUTsOpportunity(similarTestGroups);
+
+        for(String test: testClassResult.listPastaTests) {
+            String analyticsMethodKey = className + "#" + test;
+            for(String splitTest: putsOpportunities) {
+                if (splitTest.startsWith(test + "_")) {
+                    analyticsMap.get(analyticsMethodKey).isRetrofittingOpportunity = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    public static void collectTestAnalyticsAfterPhaseII(TestFileResult testClassResult, String putsFile) throws FileNotFoundException {
+        String className = extractClassName(testClassResult.filePath);
+        CompilationUnit cu = configureJavaParserAndGetCompilationUnit(putsFile);
+
+        for(String test: testClassResult.listPastaTests) {
+            String analyticsMethodKey = className + "#" + test;
+
+            if(cu.findAll(MethodDeclaration.class).stream()
+                    .anyMatch(method -> method.getNameAsString().startsWith(test + "_") && method.getAnnotationByName("ParameterizedTest").isPresent())) {
+                analyticsMap.get(analyticsMethodKey).becameRetrofittedTest = true;
+            }
+            if(analyticsMap.get(analyticsMethodKey).isRetrofittingOpportunity)
+                analyticsMap.get(analyticsMethodKey).retrofittingSuccessful = true;
+            analyticsMap.get(analyticsMethodKey).lineCountAfterP2 = extractTestLogicLineCountForSplittedTests(cu, test);
+        }
+    }
+
     public static ResultCreateRefreshedTestFilesInSandbox createRefreshedTestFilesInSandbox(List<TestFileResult> results) throws IOException {
         int totalNewSeparatedTestsCreated = 0;
         int totalNewPUTsCreated = 0;
@@ -2416,12 +2678,15 @@ public class Refactor2Refresh {
             if(testClassResult.pastaCount == 0) {
                 continue;
             }
-            // todo change the logic to create new file independent assertion cluster separated tests instead of purified => Check if done!
+
+            collectTestAnalyticsBeforePhaseI(testClassResult);
+
+            // PHASE I
+            // Purified file has separated tests of only the pasta tests from the original file.
             ResultCreateNewClassFileWithSplittedTests resultx = createNewClassFileWithSplittedTests(testClassResult);
             String purifiedOutputFilePath = resultx.newClassFilePath;
             totalNewSeparatedTestsCreated += resultx.newSeparatedTests;
-            // Purified file has separated tests of only the pasta tests from the original file.
-            // Should also have others? I think it's fine.
+            collectTestAnalyticsAfterPhaseI(testClassResult, resultx);
 
             // PHASE II
             // Replace all the type 2 clones with their respective PUT
@@ -2437,7 +2702,7 @@ public class Refactor2Refresh {
                 System.out.println("No potential PUTs for file: " + purifiedOutputFilePath);
                 continue;
             }
-
+            collectTestAnalyticsBeforePhaseII(testClassResult, similarTestGroups);
             List<MethodDeclaration> newPUTs = new ArrayList<>();
             try {
                 newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
@@ -2451,7 +2716,8 @@ public class Refactor2Refresh {
             else {
                 System.out.println(newPUTs.size()/2 + " new PUTs created for file: " + purifiedOutputFilePath);
                 totalNewPUTsCreated = totalNewPUTsCreated + newPUTs.size()/2;
-                createParameterizedTestFile(purifiedOutputFilePath, newPUTs, extractTestMethodsToExclude(similarTestGroups));
+                String putsFile = createParameterizedTestFile(purifiedOutputFilePath, newPUTs, extractTestMethodsToExclude(similarTestGroups));
+                collectTestAnalyticsAfterPhaseII(testClassResult, putsFile);
             }
         }
 //        System.out.println("Total potential PUTs: " + totalPotentialPuts);
@@ -2698,6 +2964,51 @@ public class Refactor2Refresh {
         return excludedTests;
     }
 
+    public static void exportAnalyticsToCSV(String filePath) {
+        try {
+            // Ensure directory exists
+            File directory = new File(filePath.substring(0, filePath.lastIndexOf('/')));
+            if (!directory.exists()) {
+                directory.mkdirs();
+            }
+
+            // Create file and writer
+            FileWriter csvWriter = new FileWriter(filePath);
+
+            // Write header
+            csvWriter.append("TestClassName,TestMethodName,DisjointAssertionsCount,LineCountBefore,AssertionCount,");
+            csvWriter.append("LineCountAfterP1,DisjointAssertionCount,IsRetrofittingOpportunity,RetrofittingSuccessful,");
+            csvWriter.append("BecameRetrofittedTest,LineCountAfterP2\n");
+
+            // Write data rows
+            for (Map.Entry<String, TestAnalytics> entry : analyticsMap.entrySet()) {
+                TestAnalytics analytics = entry.getValue();
+
+                csvWriter.append(analytics.testClassName).append(",");
+                csvWriter.append(analytics.testMethodName).append(",");
+                csvWriter.append(String.valueOf(analytics.disjointAssertionsCount)).append(",");
+                csvWriter.append(String.valueOf(analytics.lineCountBefore)).append(",");
+                csvWriter.append(String.valueOf(analytics.assertionCount)).append(",");
+                csvWriter.append(String.valueOf(analytics.lineCountAfterP1)).append(",");
+                csvWriter.append(String.valueOf(analytics.disjointAssertionCount)).append(",");
+                csvWriter.append(String.valueOf(analytics.isRetrofittingOpportunity)).append(",");
+                csvWriter.append(String.valueOf(analytics.retrofittingSuccessful)).append(",");
+                csvWriter.append(String.valueOf(analytics.becameRetrofittedTest)).append(",");
+                csvWriter.append(String.valueOf(analytics.lineCountAfterP2)).append("\n");
+            }
+
+            // Close the writer
+            csvWriter.flush();
+            csvWriter.close();
+
+            System.out.println("CSV file created successfully at: " + filePath);
+
+        } catch (IOException e) {
+            System.err.println("Error writing CSV file: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
     public static void main(String[] args) throws IOException {
         if (args.length < 2) {
             throw new IllegalArgumentException("Please provide the path to the input file as an argument.");
@@ -2720,6 +3031,7 @@ public class Refactor2Refresh {
         }
         else if (operation.equals("fixInRepo")) {
             fixAssertionPastaInRepo(inputFile);
+            exportAnalyticsToCSV("/Users/monilnarang/Documents/Research Evaluations/analytics/Apr22/test_analytics.csv");
         } else if(operation.equals("fixinfile")) {
             List<TestFileResult> clutters = new ArrayList<>();
             clutters.add(identifyAssertionPastas(inputFile));
@@ -2783,6 +3095,9 @@ public class Refactor2Refresh {
         }
     }
 }
+
+
+// And if after unique line count is less than before skip that test? (e.g. , Thread.sleep(1000);)
 
 
 
