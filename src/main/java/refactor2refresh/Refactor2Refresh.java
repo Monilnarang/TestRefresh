@@ -68,7 +68,15 @@ public class Refactor2Refresh {
         JavaSymbolSolver symbolSolver = new JavaSymbolSolver(combinedTypeSolver);
         StaticJavaParser.getConfiguration().setSymbolResolver(symbolSolver);
         StaticJavaParser.getConfiguration().setAttributeComments(false);
-        CompilationUnit cu = StaticJavaParser.parse(new File(filePath));
+        CompilationUnit cu;
+        try{
+            cu = StaticJavaParser.parse(new File(filePath));
+        } catch (Exception e) {
+            System.out.println("Error parsing file: " + filePath);
+            e.printStackTrace();
+            throw new RuntimeException("Error parsing file: " + filePath, e);
+        }
+
         return cu;
     }
 
@@ -196,7 +204,63 @@ public class Refactor2Refresh {
             testsTaken.add(testMethodName1);
             similarTestGroups.add(toPutTogether);
         }
-        return similarTestGroups;
+        // check if a group doesn't have any hardcoded value them split them as separate groups.
+        return processTestGroups(similarTestGroups);
+    }
+
+    public static List<List<UnitTest>> processTestGroups(List<List<UnitTest>> similarTestGroups) {
+        List<List<UnitTest>> processedGroups = new ArrayList<>();
+
+        for (List<UnitTest> group : similarTestGroups) {
+            // If group has only one test or is empty, just add it as is
+            if (group == null || group.size() <= 1) {
+                processedGroups.add(group);
+                continue;
+            }
+
+            boolean groupHasLiterals = false;
+
+            // Check if any test in the group contains literals
+            for (UnitTest test : group) {
+                if (containsLiterals(test.Statements)) {
+                    groupHasLiterals = true;
+                    break;
+                }
+            }
+
+            if (groupHasLiterals) {
+                // If group has literals, keep it as is
+                processedGroups.add(group);
+            } else {
+                // If group doesn't have literals, split each test into its own group
+                for (UnitTest test : group) {
+                    List<UnitTest> singleTestGroup = new ArrayList<>();
+                    singleTestGroup.add(test);
+                    processedGroups.add(singleTestGroup);
+                }
+            }
+        }
+
+        return processedGroups;
+    }
+
+    public static boolean containsLiterals(NodeList<Node> statements) {
+        if (statements == null || statements.isEmpty()) {
+            return false;
+        }
+
+        // Create a visitor that checks for literals
+        LiteralCheckVisitor literalVisitor = new LiteralCheckVisitor();
+
+        // Visit each statement
+        for (Node statement : statements) {
+            statement.accept(literalVisitor, null);
+            if (literalVisitor.hasFoundLiteral()) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static String generateParameterizedTestName(List<UnitTest> group) {
@@ -450,7 +514,6 @@ public class Refactor2Refresh {
         return resultMap;
     }
 
-    // Helper method to create the appropriate LiteralExpr based on the value
     private static LiteralExpr createLiteralExpr(String value) {
         // Check if it's null
         if (value == null || value.equals("null")) {
@@ -464,7 +527,8 @@ public class Refactor2Refresh {
 
         // Check if it's a character (enclosed in single quotes)
         if (value.length() >= 3 && value.startsWith("'") && value.endsWith("'")) {
-            return new CharLiteralExpr(value.substring(1, value.length() - 1));
+//            return new CharLiteralExpr(value.substring(1, value.length() - 1));
+            return new StringLiteralExpr(value);
         }
 
         // Check if it's a string (enclosed in double quotes)
@@ -472,12 +536,22 @@ public class Refactor2Refresh {
             return new StringLiteralExpr(value.substring(1, value.length() - 1));
         }
 
-        // Check if it's a long
+        // Check if it's a long literal (must check before regular number parsing)
         if (value.endsWith("L") || value.endsWith("l")) {
-            try {
-                return new LongLiteralExpr(value);
-            } catch (NumberFormatException e) {
-                // Not a valid long, will continue to other checks
+            // Only try to parse if it's not a special case like "C/C=C/?Cl"
+            if (!value.contains("/")) {
+                try {
+                    // Remove the 'L' suffix for parsing
+                    String numValue = value.substring(0, value.length() - 1);
+                    Long.parseLong(numValue); // Just to validate
+                    return new LongLiteralExpr(value);
+                } catch (NumberFormatException e) {
+                    // If it fails parsing as a long, treat it as a string
+                    return new StringLiteralExpr(value);
+                }
+            } else {
+                // This is a string like "C/C=C/?Cl" that ends with 'l'
+                return new StringLiteralExpr(value);
             }
         }
 
@@ -548,7 +622,7 @@ public class Refactor2Refresh {
                 method.setName(newTestName);
 
                 // Create the MethodSource annotation
-                String methodSourceName = newTestName + "Provider";
+                String methodSourceName =  "Provider_" + newTestName;
                 SingleMemberAnnotationExpr methodSourceAnnotation = new SingleMemberAnnotationExpr();
                 methodSourceAnnotation.setName("MethodSource");
                 methodSourceAnnotation.setMemberValue(new StringLiteralExpr(methodSourceName));
@@ -2427,13 +2501,16 @@ public class Refactor2Refresh {
         int totalNewSeparatedTestsCreated;
         int totalNewPUTsCreated;
         int totalPotentialPuts;
+        int totalTestsAfterP2;
+        TestFileResult aggregatedResult;
 
-        public ResultCreateRefreshedTestFilesInSandbox(int totalNewSeparatedTestsCreated, int totalNewPUTsCreated, int totalPotentialPuts) {
+        public ResultCreateRefreshedTestFilesInSandbox(int totalNewSeparatedTestsCreated, int totalNewPUTsCreated, int totalPotentialPuts, int totalTestsAfterP2, TestFileResult aggregatedResult) {
             this.totalNewSeparatedTestsCreated = totalNewSeparatedTestsCreated;
             this.totalNewPUTsCreated = totalNewPUTsCreated;
             this.totalPotentialPuts = totalPotentialPuts;
+            this.totalTestsAfterP2 = totalTestsAfterP2;
+            this.aggregatedResult = aggregatedResult;
         }
-
     }
 
     public static int extractTestLogicLineCount(CompilationUnit cu, String testName) {
@@ -2443,6 +2520,7 @@ public class Refactor2Refresh {
         // Visit all methods in the compilation unit
         cu.findAll(MethodDeclaration.class).stream()
                 .filter(method -> method.getNameAsString().equals(testName))
+                .filter(method -> method.getAnnotationByName("Test").isPresent() && !method.getAnnotationByName("ParameterizedTest").isPresent())
                 .forEach(method -> {
                     // Get the method body
                     Optional<BlockStmt> bodyOpt = method.getBody();
@@ -2598,6 +2676,36 @@ public class Refactor2Refresh {
         return listOppos;
     }
 
+    public static int extractAllAssertionsForOldTestName(CompilationUnit cu, String oldName) {
+        String methodPrefix = oldName + "_";
+        List<MethodDeclaration> newTests = new ArrayList<>();
+        cu.findAll(MethodDeclaration.class).stream()
+                .filter(method -> method.getNameAsString().startsWith(methodPrefix))
+                .forEach(method -> {
+                    newTests.add(method);
+                }
+        );
+        int totalAssertions = 0;
+        for (MethodDeclaration newTest : newTests) {
+            List<MethodCallExpr> assertions = extractAssertions(newTest);
+            totalAssertions += assertions.size();
+        }
+        return totalAssertions;
+    }
+
+    public static List<String> extractSimilarTestsForGivenRetrofittedTest(List<List<UnitTest>> similarTestGroups, String test) {
+        List<String> similarTests = new ArrayList<>();
+        for(List<UnitTest> group : similarTestGroups) {
+            for (UnitTest unitTest : group) {
+                if (unitTest.Name.startsWith(test)) {
+                    similarTests.addAll(group.stream().map(unitTest1 -> unitTest1.Name).collect(Collectors.toList()));
+                    break;
+                }
+            }
+        }
+        return similarTests;
+    }
+
     public static void collectTestAnalyticsBeforePhaseI(TestFileResult testClassResult) throws FileNotFoundException {
         String className = extractClassName(testClassResult.filePath);
         CompilationUnit cu = configureJavaParserAndGetCompilationUnit(testClassResult.filePath);
@@ -2625,7 +2733,7 @@ public class Refactor2Refresh {
     }
 
 
-    public static void collectTestAnalyticsAfterPhaseI(TestFileResult testClassResult, ResultCreateNewClassFileWithSplittedTests result) throws FileNotFoundException {
+    public static boolean collectTestAnalyticsAfterPhaseIAndReturnStop(TestFileResult testClassResult, ResultCreateNewClassFileWithSplittedTests result) throws FileNotFoundException {
         String className = extractClassName(testClassResult.filePath);
         String purifiedOutputFilePath = result.newClassFilePath;
         int totalNewSeparatedTestsCreated = result.newSeparatedTests;
@@ -2634,8 +2742,17 @@ public class Refactor2Refresh {
         for(String test: testClassResult.listPastaTests) {
             String analyticsMethodKey = className + "#" + test;
             analyticsMap.get(analyticsMethodKey).lineCountAfterP1 = extractTestLogicLineCountForSplittedTests(cu, test);
-            analyticsMap.get(analyticsMethodKey).disjointAssertionCount = extractDisjointAssertionCountForTest(cu, test);
+            // if line count aren't equal stop its processing
+            if(analyticsMap.get(analyticsMethodKey).lineCountBefore != analyticsMap.get(analyticsMethodKey).lineCountAfterP1) {
+                // stop processing whole test class
+                for(String removeTest: testClassResult.listPastaTests) {
+                    String analyticsMethodKey2 = className + "#" + removeTest;
+                    analyticsMap.get(analyticsMethodKey2).stopProcessing = true;
+                }
+                return true;
+            }
         }
+        return false;
     }
 
     public static void collectTestAnalyticsBeforePhaseII(TestFileResult testClassResult, List<List<UnitTest>> similarTestGroups) {
@@ -2653,20 +2770,22 @@ public class Refactor2Refresh {
         }
     }
 
-    public static void collectTestAnalyticsAfterPhaseII(TestFileResult testClassResult, String putsFile) throws FileNotFoundException {
+    public static void collectTestAnalyticsAfterPhaseII(TestFileResult testClassResult, String putsFile, List<List<UnitTest>> similarTestGroups) throws FileNotFoundException {
         String className = extractClassName(testClassResult.filePath);
         CompilationUnit cu = configureJavaParserAndGetCompilationUnit(putsFile);
 
         for(String test: testClassResult.listPastaTests) {
             String analyticsMethodKey = className + "#" + test;
 
-            if(cu.findAll(MethodDeclaration.class).stream()
-                    .anyMatch(method -> method.getNameAsString().startsWith(test + "_") && method.getAnnotationByName("ParameterizedTest").isPresent())) {
+            if(cu.findAll(MethodDeclaration.class).stream().anyMatch(method -> method.getNameAsString().startsWith(test + "_") && method.getAnnotationByName("ParameterizedTest").isPresent())) {
                 analyticsMap.get(analyticsMethodKey).becameRetrofittedTest = true;
+                analyticsMap.get(analyticsMethodKey).testsRefactoredTogether = extractSimilarTestsForGivenRetrofittedTest(similarTestGroups, test + "_");
             }
+            // update this to actually check -> only execute if run successful, so fine
             if(analyticsMap.get(analyticsMethodKey).isRetrofittingOpportunity)
                 analyticsMap.get(analyticsMethodKey).retrofittingSuccessful = true;
             analyticsMap.get(analyticsMethodKey).lineCountAfterP2 = extractTestLogicLineCountForSplittedTests(cu, test);
+            analyticsMap.get(analyticsMethodKey).assertionCountAfterP2 = extractAllAssertionsForOldTestName(cu, test);
         }
     }
 
@@ -2674,8 +2793,11 @@ public class Refactor2Refresh {
         int totalNewSeparatedTestsCreated = 0;
         int totalNewPUTsCreated = 0;
         int totalPotentialPuts = 0;
+        int totalTestsAfterP2 = 0;
+        TestFileResult aggregated = new TestFileResult();
         for (TestFileResult testClassResult : results) {
             if(testClassResult.pastaCount == 0) {
+                aggregated = aggregate(aggregated, testClassResult);
                 continue;
             }
 
@@ -2685,9 +2807,16 @@ public class Refactor2Refresh {
             // Purified file has separated tests of only the pasta tests from the original file.
             ResultCreateNewClassFileWithSplittedTests resultx = createNewClassFileWithSplittedTests(testClassResult);
             String purifiedOutputFilePath = resultx.newClassFilePath;
-            totalNewSeparatedTestsCreated += resultx.newSeparatedTests;
-            collectTestAnalyticsAfterPhaseI(testClassResult, resultx);
+            boolean stop = collectTestAnalyticsAfterPhaseIAndReturnStop(testClassResult, resultx);
 
+            if(stop) {
+                System.out.println("Stopping processing for file: " + testClassResult.filePath);
+                // ideally also delete the purified file
+                continue;
+            }
+
+            aggregated = aggregate(aggregated, testClassResult);
+            totalNewSeparatedTestsCreated += resultx.newSeparatedTests;
             // PHASE II
             // Replace all the type 2 clones with their respective PUT
             CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedOutputFilePath);
@@ -2700,6 +2829,9 @@ public class Refactor2Refresh {
             System.out.println("Potential PUTs: " + potentialPUTs);
             if(potentialPUTs == 0) {
                 System.out.println("No potential PUTs for file: " + purifiedOutputFilePath);
+                CompilationUnit cuCut = configureJavaParserAndGetCompilationUnit(purifiedOutputFilePath);
+                // check logic ? ? ?
+                totalTestsAfterP2 += countTestMethods(cuCut);
                 continue;
             }
             collectTestAnalyticsBeforePhaseII(testClassResult, similarTestGroups);
@@ -2712,17 +2844,60 @@ public class Refactor2Refresh {
 
             if(newPUTs.size() == 0) {
                 System.out.println("ERROR?: Puts should be created: " + purifiedOutputFilePath);
+                // todo update analytics map to have false in retrofitting successful for all tests of class
+                // todo fix hadoop failure due to java parser, skip such unparsable classes
+                //      => is the unparsable code something I created?
             }
             else {
                 System.out.println(newPUTs.size()/2 + " new PUTs created for file: " + purifiedOutputFilePath);
                 totalNewPUTsCreated = totalNewPUTsCreated + newPUTs.size()/2;
                 String putsFile = createParameterizedTestFile(purifiedOutputFilePath, newPUTs, extractTestMethodsToExclude(similarTestGroups));
-                collectTestAnalyticsAfterPhaseII(testClassResult, putsFile);
+                collectTestAnalyticsAfterPhaseII(testClassResult, putsFile, similarTestGroups);
+
+                CompilationUnit cuPut = configureJavaParserAndGetCompilationUnit(putsFile);
+                // check logic ? ? ?
+                totalTestsAfterP2 += countTestMethods(cuPut);
             }
         }
 //        System.out.println("Total potential PUTs: " + totalPotentialPuts);
 //        System.out.println("Total new separated tests created: " + totalNewSeparatedTestsCreated);
-        return new ResultCreateRefreshedTestFilesInSandbox(totalNewSeparatedTestsCreated, totalNewPUTsCreated, totalPotentialPuts);
+
+        // Calculate the overall percentage
+        if (aggregated.totalConsideredTests > 0) {
+            aggregated.pastaPercentage =
+                    (double) aggregated.pastaCount / aggregated.totalConsideredTests * 100;
+        }
+        return new ResultCreateRefreshedTestFilesInSandbox(totalNewSeparatedTestsCreated, totalNewPUTsCreated, totalPotentialPuts, totalTestsAfterP2, aggregated);
+    }
+
+    public static int countTestMethods(CompilationUnit cu) {
+        // Counter for the number of test methods
+        AtomicInteger testCount = new AtomicInteger(0);
+
+        // Visit all method declarations in the CompilationUnit
+        cu.findAll(MethodDeclaration.class).forEach(method -> {
+            // Check if the method has either @Test or @ParameterizedTest annotation
+            boolean isTest = method.getAnnotations().stream()
+                    .anyMatch(annotation -> {
+                        String name = annotation.getNameAsString();
+                        return name.equals("Test") || name.equals("ParameterizedTest");
+                    });
+
+            if (isTest) {
+                testCount.incrementAndGet();
+            }
+        });
+
+        return testCount.get();
+    }
+
+    public static TestFileResult aggregate(TestFileResult aggregated, TestFileResult result) {
+
+        // Sum up the integer values
+        aggregated.totalTests += result.totalTests;
+        aggregated.totalConsideredTests += result.totalConsideredTests;
+        aggregated.pastaCount += result.pastaCount;
+        return aggregated;
     }
 
     /**
@@ -2844,14 +3019,20 @@ public class Refactor2Refresh {
             System.out.println("Combined report generated: " + allReportsFileName);
         }
 
-    public static void fixAssertionPastaInRepo(String pathToJavaRepository) throws IOException {
+    public static ResultCreateRefreshedTestFilesInSandbox fixAssertionPastaInRepo(String pathToJavaRepository) throws IOException {
         List<TestFileResult> results = getAssertionPastaResultsInRepo(pathToJavaRepository);
         // for each results in a file
         // create file with only pastas and todo: add all of top code
         ResultCreateRefreshedTestFilesInSandbox result = createRefreshedTestFilesInSandbox(results);
-        System.out.println("Total new separated tests created: " + result.totalNewSeparatedTestsCreated);
+        System.out.println("Total tests: " + result.aggregatedResult.totalTests);
+        System.out.println("Total considered tests: " + result.aggregatedResult.totalConsideredTests);
+        System.out.println("Total pasta tests: " + result.aggregatedResult.pastaCount);
+        System.out.println("Total pasta percentage: " + result.aggregatedResult.pastaPercentage);
+        System.out.println("Total new separated tests created after P1: " + result.totalNewSeparatedTestsCreated);
         System.out.println("Total potential PUTs: " + result.totalPotentialPuts);
         System.out.println("Total new PUTs created: " + result.totalNewPUTsCreated);
+        System.out.println("Total test count after P2: " + result.totalTestsAfterP2);
+        return result;
     }
 
     public static void detectAssertionPastaAndGenerateReport(String pathToJavaRepository) throws IOException {
@@ -2964,7 +3145,7 @@ public class Refactor2Refresh {
         return excludedTests;
     }
 
-    public static void exportAnalyticsToCSV(String filePath) {
+    public static void exportAnalyticsToCSV(String filePath, ResultCreateRefreshedTestFilesInSandbox result) {
         try {
             // Ensure directory exists
             File directory = new File(filePath.substring(0, filePath.lastIndexOf('/')));
@@ -2976,9 +3157,81 @@ public class Refactor2Refresh {
             FileWriter csvWriter = new FileWriter(filePath);
 
             // Write header
-            csvWriter.append("TestClassName,TestMethodName,DisjointAssertionsCount,LineCountBefore,AssertionCount,");
-            csvWriter.append("LineCountAfterP1,DisjointAssertionCount,IsRetrofittingOpportunity,RetrofittingSuccessful,");
-            csvWriter.append("BecameRetrofittedTest,LineCountAfterP2\n");
+            csvWriter.append("TestClass,TestMethod,#DisjointAssertions,#LocBefore,#Assertions,");
+            csvWriter.append("#LocAfterP1,IsPUTOpportunity,PUTSuccess,");
+            csvWriter.append("BecamePUT,#LocAfterP2, #AssertionAfterP2, TestsPUTTogether\n");
+
+            // Write data rows
+            for (Map.Entry<String, TestAnalytics> entry : analyticsMap.entrySet()) {
+                TestAnalytics analytics = entry.getValue();
+
+                if(analytics.stopProcessing) {
+                    continue;
+                }
+                if(analytics.lineCountBefore!=analytics.lineCountAfterP1) {
+                    System.out.println("ERROR? : Found unequal lines before and after");
+                    continue;
+                }
+
+
+                csvWriter.append(analytics.testClassName).append(",");
+                csvWriter.append(analytics.testMethodName).append(",");
+                csvWriter.append(String.valueOf(analytics.disjointAssertionsCount)).append(",");
+                csvWriter.append(String.valueOf(analytics.lineCountBefore)).append(",");
+                csvWriter.append(String.valueOf(analytics.assertionCount)).append(",");
+                csvWriter.append(String.valueOf(analytics.lineCountAfterP1)).append(",");
+                csvWriter.append(String.valueOf(analytics.isRetrofittingOpportunity)).append(",");
+                csvWriter.append(String.valueOf(analytics.retrofittingSuccessful)).append(",");
+                csvWriter.append(String.valueOf(analytics.becameRetrofittedTest)).append(",");
+                csvWriter.append(String.valueOf(analytics.lineCountAfterP2)).append(",");
+                csvWriter.append(String.valueOf(analytics.assertionCountAfterP2)).append(",");
+                csvWriter.append(String.valueOf(analytics.testsRefactoredTogether)).append("\n");
+            }
+
+            // Add a blank line to separate the sections
+            csvWriter.append("\n");
+
+            // Add summary data from ResultCreateRefreshedTestFilesInSandbox
+            csvWriter.append("Summary Statistics\n");
+//            csvWriter.append("Total tests,").append(String.valueOf(result.aggregatedResult.totalTests)).append("\n");
+            csvWriter.append("Total considered tests,").append(String.valueOf(result.aggregatedResult.totalConsideredTests)).append("\n");
+            csvWriter.append("Total pasta tests,").append(String.valueOf(result.aggregatedResult.pastaCount)).append("\n");
+            csvWriter.append("Total pasta percentage,").append(String.valueOf(result.aggregatedResult.pastaPercentage)).append("\n");
+            csvWriter.append("Total new separated tests created after P1,").append(String.valueOf(result.totalNewSeparatedTestsCreated)).append("\n");
+            csvWriter.append("Total potential PUTs,").append(String.valueOf(result.totalPotentialPuts)).append("\n");
+            csvWriter.append("Total new PUTs created,").append(String.valueOf(result.totalNewPUTsCreated)).append("\n");
+            csvWriter.append("Total test method after P2,").append(String.valueOf(result.totalTestsAfterP2)).append("\n");
+
+            // Add another blank line
+            csvWriter.append("\n");
+
+            // Close the writer
+            csvWriter.flush();
+            csvWriter.close();
+
+            System.out.println("CSV file created successfully at: " + filePath);
+
+        } catch (IOException e) {
+            System.err.println("Error writing CSV file: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    public static void exportAnalyticsToCSVOld(String filePath) {
+        try {
+            // Ensure directory exists
+            File directory = new File(filePath.substring(0, filePath.lastIndexOf('/')));
+            if (!directory.exists()) {
+                directory.mkdirs();
+            }
+
+            // Create file and writer
+            FileWriter csvWriter = new FileWriter(filePath);
+
+            // Write header
+            csvWriter.append("TestClass,TestMethod,#DisjointAssertions,#LocBefore,#Assertions,");
+            csvWriter.append("#LocAfterP1,IsPUTOpportunity,PUTSuccess,");
+            csvWriter.append("BecamePUT,#LocAfterP2, #AssertionAfterP2, TestsPUTTogether\n");
 
             // Write data rows
             for (Map.Entry<String, TestAnalytics> entry : analyticsMap.entrySet()) {
@@ -2990,11 +3243,12 @@ public class Refactor2Refresh {
                 csvWriter.append(String.valueOf(analytics.lineCountBefore)).append(",");
                 csvWriter.append(String.valueOf(analytics.assertionCount)).append(",");
                 csvWriter.append(String.valueOf(analytics.lineCountAfterP1)).append(",");
-                csvWriter.append(String.valueOf(analytics.disjointAssertionCount)).append(",");
                 csvWriter.append(String.valueOf(analytics.isRetrofittingOpportunity)).append(",");
                 csvWriter.append(String.valueOf(analytics.retrofittingSuccessful)).append(",");
                 csvWriter.append(String.valueOf(analytics.becameRetrofittedTest)).append(",");
-                csvWriter.append(String.valueOf(analytics.lineCountAfterP2)).append("\n");
+                csvWriter.append(String.valueOf(analytics.lineCountAfterP2)).append(",");
+                csvWriter.append(String.valueOf(analytics.assertionCountAfterP2)).append(",");
+                csvWriter.append(String.valueOf(analytics.testsRefactoredTogether)).append("\n");
             }
 
             // Close the writer
@@ -3030,8 +3284,8 @@ public class Refactor2Refresh {
             identifyAssertionPastas(inputFile);
         }
         else if (operation.equals("fixInRepo")) {
-            fixAssertionPastaInRepo(inputFile);
-            exportAnalyticsToCSV("/Users/monilnarang/Documents/Research Evaluations/analytics/Apr22/test_analytics.csv");
+            ResultCreateRefreshedTestFilesInSandbox result = fixAssertionPastaInRepo(inputFile);
+            exportAnalyticsToCSV("/Users/monilnarang/Documents/Research Evaluations/analytics/Apr22/test_analytics.csv", result);
         } else if(operation.equals("fixinfile")) {
             List<TestFileResult> clutters = new ArrayList<>();
             clutters.add(identifyAssertionPastas(inputFile));
