@@ -204,6 +204,25 @@ public class TestEnhancer {
                 "arguments(value1, value2)\n" +
                 "arguments(value3, value4)";
 
+//        String testMethodCode = "";
+//
+//        // for thesis
+//        String prompt = "I have a parameterized test provider method that currently contains these parameter sets:\n\n" +
+//                methodBody + "\n\n" +
+//                "Here is the test method that uses these parameters:\n" +
+//                testMethodCode + "\n\n" +
+//                "The test method has these parameters: " +
+//                IntStream.range(0, paramTypes.size())
+//                        .mapToObj(i -> paramTypes.get(i) + " " + paramNames.get(i))
+//                        .collect(Collectors.joining(", ")) + "\n\n" +
+//                "The test is for " + classUnderTest +
+//                (methodSignatures.isEmpty() ? "" : " testing these methods:\n" +
+//                        String.join("\n", methodSignatures)) + "\n\n" +
+//                "Please suggest 3–5 additional value sets that test edge cases. " +
+//                "Return ONLY the new arguments() method calls without explanation, one per line, like this format:\n" +
+//                "arguments(value1, value2)\n" +
+//                "arguments(value3, value4)";
+
         // Call Claude API to get suggestions
         String claudeResponse = callChatGPT(prompt);
 
@@ -261,6 +280,21 @@ public class TestEnhancer {
         List<String> currentParamNames = paramTest.getParameters().stream()
                 .map(p -> p.getNameAsString())
                 .collect(Collectors.toList());
+//
+//        String testMethodCode = paramTest.toString();
+//
+//        // prompt to suggest better parameter names -  for thesis
+//        String prompt = "I have a parameterized test method with these parameters:\n\n" +
+//                IntStream.range(0, currentParamTypes.size())
+//                        .mapToObj(i -> currentParamTypes.get(i) + " " + currentParamNames.get(i))
+//                        .collect(Collectors.joining(", ")) + "\n\n" +
+//                "Here is the actual test method:\n" +
+//                testMethodCode + "\n\n" +  // <-- Add the full test method code here
+//                "The test is for " + classUnderTest +
+//                (methodSignatures.isEmpty() ? "" : " testing these methods:\n" +
+//                        String.join("\n", methodSignatures)) + "\n\n" +
+//                "Please suggest more meaningful names for these parameters based on their likely purpose. " +
+//                "Return ONLY a comma-separated list of new parameter names without types or explanations.";
 
         // Prepare prompt for Claude to suggest better parameter names
         String prompt = "I have a parameterized test method with these parameters:\n\n" +
@@ -351,6 +385,18 @@ public class TestEnhancer {
                     .append(currentNames.get(i)).append("\n")
                     .append(testMethods.get(i).toString()).append("\n\n");
         }
+
+//        String testCode = methodContextBuilder.toString();
+//
+//        // Test Method Naming Prompt - for thesis
+//        String prompt = "I have the following JUnit test method from the class " + classUnderTest + ":\n\n" +
+//                testCode + "\n\n" +
+//                (methodSignatures.isEmpty() ? "" : "The method(s) under test are:\n" +
+//                        String.join("\n", methodSignatures) + "\n\n") +
+//                "Please suggest a more descriptive name for this test method that clearly indicates what it is testing.\n" +
+//                "Return ONLY the new method name as a valid Java identifier, starting with 'test'." +
+//                "Do not include the method signature or any explanation.";
+
 
         // Prepare prompt for Claude
         String prompt = "I have " + testMethods.size() + " test methods for " + classUnderTest + ":\n\n" +

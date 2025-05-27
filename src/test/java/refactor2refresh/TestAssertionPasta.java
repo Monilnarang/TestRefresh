@@ -2,18 +2,15 @@ package refactor2refresh;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.Assert.assertEquals;
-public class AssertionPasta {
+public class TestAssertionPasta {
     @Test
     public void test1() {
-        int a = 5;
-        int b = 6;
-        int expectedAB = 11;
-        int c = 16;
-        int d = 15;
-        int expectedCD = 31;
-        assertEquals(expectedAB, a + b);
-        assertEquals(expectedCD, c + d);
-        assertEquals(11, a + b);
+        int a = 11;
+        int b = 31;
+        int exa = 11;
+        int exb = 31;
+        assertEquals(exa, a);
+        assertEquals(exb, b);
     }
 //    @Test
 //    public void test2() {

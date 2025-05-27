@@ -32,9 +32,14 @@ import java.io.*;
 import java.util.*;
 import java.util.stream.Collectors;
 
-public class Refactor2Refresh {
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import java.io.FileOutputStream;
+
+public class Untangle2Weave {
 
     public static HashMap<String, TestAnalytics> analyticsMap = new HashMap<>();
+    static Map<Integer, Integer> separableComponentFrequency = new HashMap<>();
     // key => TestClass#TestMethod
     public static int TotalRedundantTests = 0;
     public static int TotalNewPuts = 0;
@@ -422,6 +427,7 @@ public class Refactor2Refresh {
     public static TreeMap<Integer, ArrayList<LiteralExpr>> path_to_values_map(ArrayList<ArrayList<TrieLikeNode>> similar_tries) {
         // Initialize the result map
         TreeMap<Integer, ArrayList<LiteralExpr>> resultMap = new TreeMap<>();
+        int pathCounter = 0;
 
         // If there are no tries to process, return the empty map
         if (similar_tries == null || similar_tries.isEmpty()) {
@@ -437,9 +443,7 @@ public class Refactor2Refresh {
 
             // Perform BFS starting from this root
             Queue<PathNode> queue = new LinkedList<>();
-            queue.add(new PathNode(root, rootIndex)); // Start with the root path
-
-            int pathCounter = 0;
+            queue.add(new PathNode(root, pathCounter++)); // Start with the root path
 
             while (!queue.isEmpty()) {
                 PathNode current = queue.poll();
@@ -449,7 +453,7 @@ public class Refactor2Refresh {
                 // If this is a literal node, store its path and value
                 if (node.type == StatementType.LITERAL) {
                     // Create a unique path ID
-                    int pathId = path * 10000 + pathCounter++;
+                    int pathId = path;
 
                     // Create a new entry for this path with the literal value
                     ArrayList<LiteralExpr> values = new ArrayList<>();
@@ -463,7 +467,7 @@ public class Refactor2Refresh {
                 // Add all children to the queue with updated paths
                 for (int i = 0; i < node.children.size(); i++) {
                     // Create a new path by appending the child index
-                    int newPath = path * 100 + i;
+                    int newPath = pathCounter++;
                     queue.add(new PathNode(node.children.get(i), newPath));
                 }
             }
@@ -474,14 +478,15 @@ public class Refactor2Refresh {
             ArrayList<TrieLikeNode> currentTrie = similar_tries.get(trieIndex);
 
             // For each root node in the current trie
+            int pathCounterSimilar = 0;
             for (int rootIndex = 0; rootIndex < currentTrie.size(); rootIndex++) {
                 TrieLikeNode root = currentTrie.get(rootIndex);
 
                 // Perform BFS starting from this root
                 Queue<PathNode> queue = new LinkedList<>();
-                queue.add(new PathNode(root, rootIndex)); // Start with the root path
+                queue.add(new PathNode(root, pathCounterSimilar++)); // Start with the root path
 
-                int pathCounter = 0;
+
 
                 while (!queue.isEmpty()) {
                     PathNode current = queue.poll();
@@ -491,7 +496,7 @@ public class Refactor2Refresh {
                     // If this is a literal node, find its corresponding path
                     if (node.type == StatementType.LITERAL) {
                         // Create the same unique path ID
-                        int pathId = path * 10000 + pathCounter++;
+                        int pathId = path;
 
                         // If this path exists in our map, add this trie's literal value
                         if (resultMap.containsKey(pathId)) {
@@ -504,7 +509,7 @@ public class Refactor2Refresh {
                     // Add all children to the queue with updated paths
                     for (int i = 0; i < node.children.size(); i++) {
                         // Create a new path by appending the child index
-                        int newPath = path * 100 + i;
+                        int newPath = pathCounterSimilar++;
                         queue.add(new PathNode(node.children.get(i), newPath));
                     }
                 }
@@ -543,8 +548,21 @@ public class Refactor2Refresh {
                 try {
                     // Remove the 'L' suffix for parsing
                     String numValue = value.substring(0, value.length() - 1);
-                    Long.parseLong(numValue); // Just to validate
-                    return new LongLiteralExpr(value);
+
+                    // Handle hex values manually since Long.decode() fails for negative hex values
+                    if (numValue.toLowerCase().startsWith("0x")) {
+                        String hexPart = numValue.substring(2);
+                        // Check if it's a valid hex string and within 64-bit range
+                        if (hexPart.matches("[0-9a-fA-F]{1,16}")) {
+                            // Parse as unsigned long, then let Java handle the two's complement conversion
+                            Long.parseUnsignedLong(hexPart, 16);
+                            return new LongLiteralExpr(value);
+                        }
+                    } else {
+                        // For non-hex values, use decode as before
+                        Long.decode(numValue);
+                        return new LongLiteralExpr(value);
+                    }
                 } catch (NumberFormatException e) {
                     // If it fails parsing as a long, treat it as a string
                     return new StringLiteralExpr(value);
@@ -575,6 +593,60 @@ public class Refactor2Refresh {
         return new StringLiteralExpr(value);
     }
 
+    private static class PathTracker {
+        Node node;
+        int path;
+
+        PathTracker(Node node, int path) {
+            this.node = node;
+            this.path = path;
+        }
+    }
+
+    // Helper method to replace literal at specific path
+    private static void replaceLiteralAtPath(MethodDeclaration method, int pathId, String parameterName) {
+        // Extract path components from pathId
+        int rootIndex = pathId / 10000;
+        int pathCounter = pathId % 10000;
+        int actualPath = rootIndex; // The path without the counter
+        int newPathCounter=0;
+
+        // Find the target literal using BFS with path tracking
+        Queue<PathTracker> queue = new LinkedList<>();
+
+        // Start BFS from method body (assuming it's the root)
+        if (method.getBody().isPresent()) {
+            BlockStmt body = method.getBody().get();
+            queue.add(new PathTracker(body, newPathCounter++));
+
+            int currentPathCounter = 0;
+
+            while (!queue.isEmpty()) {
+                PathTracker current = queue.poll();
+                Node node = current.node;
+                int currentPath = current.path;
+
+                // If this is a LiteralExpr at the target path
+                if (node instanceof LiteralExpr) {
+                    // && currentPath == pathId+1
+//                    if (currentPathCounter == pathCounter) {
+                        // Replace this specific literal
+                        ((LiteralExpr) node).replace(new NameExpr(parameterName));
+                        return;
+//                    }
+//                    currentPathCounter++;
+                }
+
+                // Add children to queue with updated paths
+                List<Node> children = node.getChildNodes();
+                for (int i = 0; i < children.size(); i++) {
+                    int newPath = newPathCounter++;
+                    queue.add(new PathTracker(children.get(i), newPath));
+                }
+            }
+        }
+    }
+
     static List<MethodDeclaration> retrofitSimilarTestsTogether(List<List<UnitTest>> similarTestGroups, CompilationUnit cu) {
         List<MethodDeclaration> newPUTsList = new ArrayList<>();
         for( List<UnitTest> group : similarTestGroups) {
@@ -603,18 +675,48 @@ public class Refactor2Refresh {
                 MethodDeclaration method = methodOpt.get();
 
                 // add parameters : replace hardcoded and add in signature
-                for (int i = 0; i < parameter_to_values_map.size(); i++) {
-                    ArrayList<LiteralExpr> values = parameter_to_values_map.firstEntry().getValue(); // TreeMap keys start from 1 in this example
+//                int index=0;
+//                for (Map.Entry<Integer, ArrayList<LiteralExpr>> entry : parameter_to_values_map.entrySet()) {
+//                    ArrayList<LiteralExpr> values = entry.getValue();
+//                    if (values != null && !values.isEmpty()) {
+//                        LiteralExpr initialValue = values.get(0);
+//                        String parameterName = "param" + (index + 1);
+//                        Class<?> parameterType = inferType(initialValue);
+//                        method.addParameter(parameterType, parameterName);
+//                        List<LiteralExpr> literalExprs = method.findAll(LiteralExpr.class);
+//                        for (LiteralExpr literalExpr : literalExprs) {
+//                            if (getLiteralValue(literalExpr).equals(getLiteralValue(initialValue))) {
+//                                literalExpr.replace(new NameExpr(parameterName));
+//                            }
+//                        }
+//                        index++;
+//                    }
+//                }
+
+                int index = 0;
+                for (Map.Entry<Integer, ArrayList<LiteralExpr>> entry : parameter_to_values_map.entrySet()) {
+                    Integer pathId = entry.getKey();
+                    ArrayList<LiteralExpr> values = entry.getValue();
+
                     if (values != null && !values.isEmpty()) {
                         LiteralExpr initialValue = values.get(0);
-                        String parameterName = "param" + (i + 1);
+                        String parameterName = "param" + (index + 1);
+                        // Use path-based replacement instead of direct value matching
+                        replaceLiteralAtPath(method, pathId, parameterName);
+
+                        index++;
+                    }
+                }
+                index=0;
+                for (Map.Entry<Integer, ArrayList<LiteralExpr>> entry : parameter_to_values_map.entrySet()) {
+                    ArrayList<LiteralExpr> values = entry.getValue();
+
+                    if (values != null && !values.isEmpty()) {
+                        LiteralExpr initialValue = values.get(0);
+                        String parameterName = "param" + (index + 1);
                         Class<?> parameterType = inferType(initialValue);
                         method.addParameter(parameterType, parameterName);
-                        method.findAll(LiteralExpr.class).forEach(literalExpr -> {
-                            if (getLiteralValue(literalExpr).equals(getLiteralValue(initialValue))) {
-                                literalExpr.replace(new NameExpr(parameterName));
-                            }
-                        });
+                        index++;
                     }
                 }
                 method.getAnnotations().removeIf(annotation -> annotation.getNameAsString().equals("Test"));
@@ -1796,6 +1898,16 @@ public class Refactor2Refresh {
                 }
             }
 
+            // Check for array initializers in method calls
+            for (ArrayInitializerExpr arrayInit : method.findAll(ArrayInitializerExpr.class)) {
+                return true; // Found array initializer expression
+            }
+
+            // Check for array creation expressions
+            for (ArrayCreationExpr arrayCreation : method.findAll(ArrayCreationExpr.class)) {
+                return true; // Found explicit array creation like 'new URI[]'
+            }
+
             // Check for complex data structures like List, Set, or Map
             List<String> complexTypes = Arrays.asList("List", "Set", "Map");
             for (VariableDeclarationExpr varDecl : method.findAll(VariableDeclarationExpr.class)) {
@@ -1982,6 +2094,7 @@ public class Refactor2Refresh {
         AtomicInteger totalTests = new AtomicInteger();
         AtomicInteger totalConsideredTests = new AtomicInteger();
         AtomicInteger AssertionPastaCount = new AtomicInteger();
+        AtomicInteger totalLocOfObservedTests = new AtomicInteger();;
 
         // Extract @Before method dependencies
         Map<String, Set<String>> beforeMethodDependencies = extractBeforeMethodDependencies(originalClass);
@@ -2003,6 +2116,8 @@ public class Refactor2Refresh {
 
                         return; // Skip this test method
                     }
+
+                    totalLocOfObservedTests.addAndGet(extractTestLogicLineCount(inputCompilationUnit, testMethod.getNameAsString()));
 
                     AtomicInteger counter = new AtomicInteger(1);
                     List<MethodDeclaration> purifiedTestsOfOriginalTest = new ArrayList<>();
@@ -2081,6 +2196,7 @@ public class Refactor2Refresh {
         result.totalConsideredTests = totalConsideredTests.get();
         result.pastaCount = AssertionPastaCount.get();
         result.pastaPercentage = totalConsideredTests.get() > 0 ? (AssertionPastaCount.get() * 100.0 / totalConsideredTests.get()) : 0.0;
+        result.totalLocInObservedTests = totalLocOfObservedTests.get();
 
 //        TestFileResult result = new TestFileResult(inputFilePath, totalConsideredTests.get(), AssertionPastaCount.get(),
 //                totalConsideredTests.get() > 0 ? (AssertionPastaCount.get() * 100.0 / totalConsideredTests.get()) : 0.0);
@@ -2108,7 +2224,7 @@ public class Refactor2Refresh {
 
     private static void generateReportAssertionPasta(List<TestFileResult> results, String repositoryPath) {
         try {
-            String reportPath = Paths.get("/Users/monilnarang/Documents/Research Evaluations/Apr9", getLastFolderName(repositoryPath) + ".md").toString();
+            String reportPath = Paths.get("/Users/monilnarang/Documents/Research Evaluations/1May", getLastFolderName(repositoryPath) + ".md").toString();
             try (PrintWriter writer = new PrintWriter(new FileWriter(reportPath))) {
                 // Write report header
                 writer.println("# Assertion Pasta Analysis Report");
@@ -2125,7 +2241,6 @@ public class Refactor2Refresh {
                 double overallPercentage = totalConsideredTests > 0 ?
                         (totalPasta * 100.0 / totalConsideredTests) : 0.0;
 
-                Map<Integer, Integer> separableComponentFrequency = new HashMap<>();
                 for (TestFileResult result : results) {
                     for (int components : result.independentLogicsInTest.values()) {
                         separableComponentFrequency.put(components, separableComponentFrequency.getOrDefault(components, 0) + 1);
@@ -2897,6 +3012,7 @@ public class Refactor2Refresh {
         aggregated.totalTests += result.totalTests;
         aggregated.totalConsideredTests += result.totalConsideredTests;
         aggregated.pastaCount += result.pastaCount;
+        aggregated.totalLocInObservedTests += result.totalLocInObservedTests;
         return aggregated;
     }
 
@@ -2907,7 +3023,7 @@ public class Refactor2Refresh {
      * @throws IOException If an I/O error occurs
      */
     public static void fixAssertionPastaInMultipleRepositoriesAndGenerateReports(String commaSeparatedPaths) throws IOException {
-            String reportOutputDir = "/Users/monilnarang/Documents/Research Evaluations/Apr9";
+            String reportOutputDir = "/Users/monilnarang/Documents/Research Evaluations/1May";
             // Create output directory if it doesn't exist
             File outputDir = new File(reportOutputDir);
             if (!outputDir.exists()) {
@@ -3161,6 +3277,8 @@ public class Refactor2Refresh {
             csvWriter.append("#LocAfterP1,IsPUTOpportunity,PUTSuccess,");
             csvWriter.append("BecamePUT,#LocAfterP2, #AssertionAfterP2, TestsPUTTogether\n");
 
+            int entriesCount = 0;
+
             // Write data rows
             for (Map.Entry<String, TestAnalytics> entry : analyticsMap.entrySet()) {
                 TestAnalytics analytics = entry.getValue();
@@ -3173,6 +3291,7 @@ public class Refactor2Refresh {
                     continue;
                 }
 
+                entriesCount++;
 
                 csvWriter.append(analytics.testClassName).append(",");
                 csvWriter.append(analytics.testMethodName).append(",");
@@ -3201,6 +3320,24 @@ public class Refactor2Refresh {
             csvWriter.append("Total potential PUTs,").append(String.valueOf(result.totalPotentialPuts)).append("\n");
             csvWriter.append("Total new PUTs created,").append(String.valueOf(result.totalNewPUTsCreated)).append("\n");
             csvWriter.append("Total test method after P2,").append(String.valueOf(result.totalTestsAfterP2)).append("\n");
+
+            // Calculate and add the new metrics
+            // 1. PUTs %
+            double putsPercentage = 0;
+            if (result.totalPotentialPuts > 0) {
+                putsPercentage = ((double) result.totalNewPUTsCreated / result.totalPotentialPuts) * 100;
+            }
+            csvWriter.append("PUTs %,").append(String.valueOf(putsPercentage)).append("\n");
+
+            // 2. Loc Before formula
+            // This creates a formula that sums D2:D[entriesCount+1]
+            csvWriter.append("Loc Before,=SUM(D2:D").append(String.valueOf(entriesCount + 1)).append(")\n");
+
+            // 3. Loc After formula
+            // This creates a formula that applies the array formula to the rows from 2 to entriesCount+1
+            String locAfterFormula = "\"=SUM(ARRAYFORMULA(IF(H2:H" + (entriesCount + 1) + "=TRUE, J2:J" + (entriesCount + 1) + ", F2:F" + (entriesCount + 1) + ")))\"";
+            csvWriter.append("Loc After,").append(locAfterFormula).append("\n");
+
 
             // Add another blank line
             csvWriter.append("\n");
@@ -3263,6 +3400,287 @@ public class Refactor2Refresh {
         }
     }
 
+    private static String extractRepoNameFromPath(String inputPath) {
+        // Handle null or empty path
+        if (inputPath == null || inputPath.isEmpty()) {
+            return "unknown_repo";
+        }
+
+        // Normalize path separators to handle both Windows and Unix paths
+        String normalizedPath = inputPath.replace('\\', '/');
+
+        // Remove trailing slash if present
+        if (normalizedPath.endsWith("/")) {
+            normalizedPath = normalizedPath.substring(0, normalizedPath.length() - 1);
+        }
+
+        // Extract the last folder name from the path
+        int lastSlashIndex = normalizedPath.lastIndexOf('/');
+        if (lastSlashIndex >= 0 && lastSlashIndex < normalizedPath.length() - 1) {
+            String folderName = normalizedPath.substring(lastSlashIndex + 1);
+
+            // If it's a file, remove the file extension
+            int dotIndex = folderName.lastIndexOf('.');
+            if (dotIndex > 0) {
+                folderName = folderName.substring(0, dotIndex);
+            }
+
+            return folderName;
+        }
+
+        // If we couldn't extract a name, return a default
+        return "repo_analytics";
+    }
+
+    private static void updateReportSheet(Workbook workbook, String sheetName, ResultCreateRefreshedTestFilesInSandbox result, int entriesCount, double averageValueSetsInPUTs) {
+        // Get or create the Report sheet
+        Sheet reportSheet = workbook.getSheet("Report");
+        if (reportSheet == null) {
+            reportSheet = workbook.createSheet("Report");
+
+            // Create header row for new report sheet
+            Row headerRow = reportSheet.createRow(0);
+            String[] reportHeaders = {
+                    "Repo","Total Tests Considered", "Total Pasta Tests", "% Pasta",
+                    "LOC Before", "LOC After", "New PUTs Created", "% PUTs", "Average Value Sets in PUTs", "Total Test", "LocTotalObserved"
+            };
+
+            CellStyle headerStyle = workbook.createCellStyle();
+            Font headerFont = workbook.createFont();
+            headerFont.setBold(true);
+            headerStyle.setFont(headerFont);
+
+            for (int i = 0; i < reportHeaders.length; i++) {
+                Cell cell = headerRow.createCell(i);
+                cell.setCellValue(reportHeaders[i]);
+                cell.setCellStyle(headerStyle);
+            }
+        }
+
+        // Find if this repo already exists in the report
+        int targetRow = -1;
+        for (int i = 1; i <= reportSheet.getLastRowNum(); i++) {
+            Row row = reportSheet.getRow(i);
+            if (row != null && row.getCell(0) != null &&
+                    row.getCell(0).getStringCellValue().equals(sheetName)) {
+                targetRow = i;
+                break;
+            }
+        }
+
+        // If repo not found, create new row
+        if (targetRow == -1) {
+            targetRow = reportSheet.getLastRowNum() + 1;
+        }
+
+        Row dataRow = reportSheet.createRow(targetRow);
+
+        // Calculate PUTs percentage
+        double putsPercentage = 0;
+        if (result.totalPotentialPuts > 0) {
+            putsPercentage = ((double) result.totalNewPUTsCreated / result.totalPotentialPuts) * 100;
+        }
+
+        // Populate the row with data
+        dataRow.createCell(0).setCellValue(sheetName); // Repo name
+        dataRow.createCell(1).setCellValue(result.aggregatedResult.totalConsideredTests); // Total tests considered
+        dataRow.createCell(2).setCellValue(result.aggregatedResult.pastaCount); // Total pasta tests
+        dataRow.createCell(3).setCellValue(result.aggregatedResult.pastaPercentage); // % Pasta
+
+        // LOC Before - create formula reference to the main sheet
+        Cell locBeforeCell = dataRow.createCell(4);
+        locBeforeCell.setCellFormula("'" + sheetName + "'!B" + (entriesCount + 12)); // Adjust row reference based on your layout
+
+        // LOC After - create formula reference to the main sheet
+        Cell locAfterCell = dataRow.createCell(5);
+        locAfterCell.setCellFormula("'" + sheetName + "'!B" + (entriesCount + 13)); // Adjust row reference based on your layout
+
+        dataRow.createCell(6).setCellValue(result.totalNewPUTsCreated); // New PUTs created
+        dataRow.createCell(7).setCellValue(putsPercentage); // % PUTs
+        dataRow.createCell(8).setCellValue(averageValueSetsInPUTs); // % PUTs
+        dataRow.createCell(9).setCellValue(result.aggregatedResult.totalTests); // Total tests in repo
+        dataRow.createCell(10).setCellValue(result.aggregatedResult.totalLocInObservedTests); // Total tests in repo
+
+        // Auto-size columns
+        for (int i = 0; i < 8; i++) {
+            reportSheet.autoSizeColumn(i);
+        }
+    }
+
+    public static void exportAnalyticsToXLSX(String filePath, ResultCreateRefreshedTestFilesInSandbox result, String sheetName) {
+        try {
+            // Create or load the workbook
+            Workbook workbook;
+            File file = new File(filePath);
+
+            // Ensure directory exists
+            File directory = new File(filePath.substring(0, filePath.lastIndexOf('/')));
+            if (!directory.exists()) {
+                directory.mkdirs();
+            }
+
+            // Check if file exists to either create new or update existing
+            if (file.exists()) {
+                FileInputStream fis = new FileInputStream(file);
+                workbook = new XSSFWorkbook(fis);
+                fis.close();
+            } else {
+                workbook = new XSSFWorkbook();
+            }
+
+            // Create a new sheet or get existing sheet with that name
+            Sheet sheet = workbook.getSheet(sheetName);
+            if (sheet != null) {
+                // Remove existing sheet if it exists to replace it
+                workbook.removeSheetAt(workbook.getSheetIndex(sheet));
+            }
+            sheet = workbook.createSheet(sheetName);
+
+            // Create cell style for headers
+            CellStyle headerStyle = workbook.createCellStyle();
+            Font headerFont = workbook.createFont();
+            headerFont.setBold(true);
+            headerStyle.setFont(headerFont);
+
+            // Create header row
+            Row headerRow = sheet.createRow(0);
+            String[] headers = {
+                    "TestClass", "TestMethod", "#DisjointAssertions", "#LocBefore", "#Assertions",
+                    "#LocAfterP1", "IsPUTOpportunity", "PUTSuccess", "BecamePUT", "#LocAfterP2",
+                    "#AssertionAfterP2", "TestsPUTTogether"
+            };
+
+            for (int i = 0; i < headers.length; i++) {
+                Cell cell = headerRow.createCell(i);
+                cell.setCellValue(headers[i]);
+                cell.setCellStyle(headerStyle);
+            }
+
+            // Keep track of row index and entries count
+            int rowIdx = 1;
+            int entriesCount = 0;
+
+            // Write data rows
+            for (Map.Entry<String, TestAnalytics> entry : analyticsMap.entrySet()) {
+                TestAnalytics analytics = entry.getValue();
+
+                if (analytics.stopProcessing) {
+                    continue;
+                }
+                if (analytics.lineCountBefore != analytics.lineCountAfterP1) {
+                    System.out.println("ERROR? : Found unequal lines before and after");
+                    continue;
+                }
+
+                entriesCount++;
+                Row row = sheet.createRow(rowIdx++);
+
+                row.createCell(0).setCellValue(analytics.testClassName);
+                row.createCell(1).setCellValue(analytics.testMethodName);
+                row.createCell(2).setCellValue(analytics.disjointAssertionsCount);
+                row.createCell(3).setCellValue(analytics.lineCountBefore);
+                row.createCell(4).setCellValue(analytics.assertionCount);
+                row.createCell(5).setCellValue(analytics.lineCountAfterP1);
+                row.createCell(6).setCellValue(analytics.isRetrofittingOpportunity);
+                row.createCell(7).setCellValue(analytics.retrofittingSuccessful);
+                row.createCell(8).setCellValue(analytics.becameRetrofittedTest);
+                row.createCell(9).setCellValue(analytics.lineCountAfterP2);
+                row.createCell(10).setCellValue(analytics.assertionCountAfterP2);
+                row.createCell(11).setCellValue(String.valueOf(analytics.testsRefactoredTogether));
+            }
+
+            // Add a blank row
+            rowIdx++;
+
+            // Add summary statistics
+            Row titleRow = sheet.createRow(rowIdx++);
+            Cell titleCell = titleRow.createCell(0);
+            titleCell.setCellValue("Summary Statistics");
+            titleCell.setCellStyle(headerStyle);
+
+            // calculate average value sets per PUT
+            double averageValueSetsPerPUT = 0;
+            int totalValueSets = 0;
+            for(TestAnalytics analytics : analyticsMap.values()) {
+                if (analytics.testsRefactoredTogether != null && analytics.testsRefactoredTogether.size() > 0) {
+                    totalValueSets = totalValueSets + analytics.testsRefactoredTogether.size();
+                }
+            }
+            averageValueSetsPerPUT = totalValueSets / (double) result.totalNewPUTsCreated;
+            if(result.totalNewPUTsCreated == 0) {
+                averageValueSetsPerPUT = 0; // Avoid division by zero
+            }
+
+            // Add summary data rows
+            addSummaryRow(sheet, rowIdx++, "Total considered tests", result.aggregatedResult.totalConsideredTests);
+            addSummaryRow(sheet, rowIdx++, "Total pasta tests", result.aggregatedResult.pastaCount);
+            addSummaryRow(sheet, rowIdx++, "Total pasta percentage", result.aggregatedResult.pastaPercentage);
+            addSummaryRow(sheet, rowIdx++, "Total new separated tests created after P1", result.totalNewSeparatedTestsCreated);
+            addSummaryRow(sheet, rowIdx++, "Total potential PUTs", result.totalPotentialPuts);
+            addSummaryRow(sheet, rowIdx++, "Total new PUTs created", result.totalNewPUTsCreated);
+            addSummaryRow(sheet, rowIdx++, "Total test method after P2", result.totalTestsAfterP2);
+
+            // Calculate PUTs percentage
+            double putsPercentage = 0;
+            if (result.totalPotentialPuts > 0) {
+                putsPercentage = ((double) result.totalNewPUTsCreated / result.totalPotentialPuts) * 100;
+            }
+            addSummaryRow(sheet, rowIdx++, "PUTs %", putsPercentage);
+
+            // Add formula for Loc Before
+            Row locBeforeRow = sheet.createRow(rowIdx++);
+            locBeforeRow.createCell(0).setCellValue("Loc Before");
+            Cell locBeforeCell = locBeforeRow.createCell(1);
+            locBeforeCell.setCellFormula("SUM(D2:D" + (entriesCount + 1) + ")");
+
+            // Add formula for Loc After
+            Row locAfterRow = sheet.createRow(rowIdx++);
+            locAfterRow.createCell(0).setCellValue("Loc After");
+            Cell locAfterCell = locAfterRow.createCell(1);
+            locAfterCell.setCellFormula("SUM(ARRAYFORMULA(IF(H2:H" + (entriesCount + 1) + "=TRUE,J2:J" + (entriesCount + 1) + ",F2:F" + (entriesCount + 1) + ")))");
+
+            // Auto-size columns for better readability
+            for (int i = 0; i < headers.length; i++) {
+                sheet.autoSizeColumn(i);
+            }
+
+            addSummaryRow(sheet, rowIdx++, "Average Value sets per PUT", averageValueSetsPerPUT);
+            addSummaryRow(sheet, rowIdx++, "Total Test in repo", result.aggregatedResult.totalTests);
+            addSummaryRow(sheet, rowIdx++, "Total Loc in observed Tests", result.aggregatedResult.totalLocInObservedTests);
+
+            updateReportSheet(workbook, sheetName, result, entriesCount, averageValueSetsPerPUT);
+
+            // Write the workbook to file
+            FileOutputStream fileOut = new FileOutputStream(filePath);
+            workbook.write(fileOut);
+            fileOut.close();
+            workbook.close();
+
+            System.out.println("Sheet '" + sheetName + "' created/updated successfully in: " + filePath);
+
+        } catch (IOException e) {
+            System.err.println("Error writing XLSX file: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    // Helper method to add summary rows
+    private static void addSummaryRow(Sheet sheet, int rowIndex, String label, Object value) {
+        Row row = sheet.createRow(rowIndex);
+        row.createCell(0).setCellValue(label);
+
+        Cell valueCell = row.createCell(1);
+        if (value instanceof Integer) {
+            valueCell.setCellValue((Integer) value);
+        } else if (value instanceof Double) {
+            valueCell.setCellValue((Double) value);
+        } else if (value instanceof String) {
+            valueCell.setCellValue((String) value);
+        } else if (value instanceof Boolean) {
+            valueCell.setCellValue((Boolean) value);
+        }
+    }
+
     public static void main(String[] args) throws IOException {
         if (args.length < 2) {
             throw new IllegalArgumentException("Please provide the path to the input file as an argument.");
@@ -3276,6 +3694,10 @@ public class Refactor2Refresh {
             for (String file : inputFiles) {
                 detectAssertionPastaAndGenerateReport(file.trim()); // Trim spaces to avoid errors
             }
+            // print map Map<Integer, Integer> separableComponentFrequency = new HashMap<>();
+             for (Map.Entry<Integer, Integer> entry : separableComponentFrequency.entrySet()) {
+                System.out.println("Key: " + entry.getKey() + ", Value: " + entry.getValue());
+             }
         }
         else if (operation.equals("allReposFix")) {
             fixAssertionPastaInMultipleRepositoriesAndGenerateReports(inputFile);
@@ -3285,8 +3707,24 @@ public class Refactor2Refresh {
         }
         else if (operation.equals("fixInRepo")) {
             ResultCreateRefreshedTestFilesInSandbox result = fixAssertionPastaInRepo(inputFile);
-            exportAnalyticsToCSV("/Users/monilnarang/Documents/Research Evaluations/analytics/Apr22/test_analytics.csv", result);
-        } else if(operation.equals("fixinfile")) {
+            String repoName = extractRepoNameFromPath(inputFile);
+            String outputFilePath = "/Users/monilnarang/Documents/Research Evaluations/analytics/Apr22/analysis.xlsx";
+//            exportAnalyticsToCSV(outputFilePath, result);
+            exportAnalyticsToXLSX(outputFilePath, result, repoName);
+        } else if(operation.equals("fixInAllRepoWithXLSXReport")) {
+            String[] inputFiles = inputFile.split(","); // Split the comma-separated paths
+            for (String file : inputFiles) {
+                ResultCreateRefreshedTestFilesInSandbox result = fixAssertionPastaInRepo(file);
+                String repoName = extractRepoNameFromPath(file);
+                String outputFilePath = "/Users/monilnarang/Documents/Research Evaluations/analytics/Apr22/analysis.xlsx";
+                exportAnalyticsToXLSX(outputFilePath, result, repoName);
+                analyticsMap.clear();
+                separableComponentFrequency.clear();
+                TotalRedundantTests = 0;
+                TotalNewPuts = 0;
+            }
+        }
+        else if(operation.equals("fixinfile")) {
             List<TestFileResult> clutters = new ArrayList<>();
             clutters.add(identifyAssertionPastas(inputFile));
             ResultCreateRefreshedTestFilesInSandbox result = createRefreshedTestFilesInSandbox(clutters);
@@ -3326,20 +3764,22 @@ public class Refactor2Refresh {
         } else if(operation.equals("retrofit")) {
 
         } else if(operation.equals("fix")) {
-            String purifiedTestsFile = createPurifiedTestFile(inputFile);
-            System.out.println( "Purified test file created: " + purifiedTestsFile);
-
-            CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedTestsFile);
-            // Later Quality check -> [runnable] [same coverage]
-            List<String> listTestMethods = extractTestMethodListFromCU(cu);
-            HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
-            List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
-            // ToDo : Impl logic to merge similar tests together
-            // create map: similarTestGroups - > lists of params for each group
-
-            List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
-            String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs, new ArrayList<>());
-            createGPTEnhancedTestFile(putsFile, newPUTs);
+            TestFileResult result = identifyAssertionPastas(inputFile);
+            createRefreshedTestFilesInSandbox(Collections.singletonList(result));
+//            String purifiedTestsFile = createPurifiedTestFile(inputFile);
+//            System.out.println( "Purified test file created: " + purifiedTestsFile);
+//
+//            CompilationUnit cu = configureJavaParserAndGetCompilationUnit(purifiedTestsFile);
+//            // Later Quality check -> [runnable] [same coverage]
+//            List<String> listTestMethods = extractTestMethodListFromCU(cu);
+//            HashMap<String, NodeList<Node>> statementNodesListMap = extractASTNodesForTestMethods(cu, listTestMethods);
+//            List<List<UnitTest>> similarTestGroups = groupSimilarTests(listTestMethods, statementNodesListMap);
+//            // ToDo : Impl logic to merge similar tests together
+//            // create map: similarTestGroups - > lists of params for each group
+//
+//            List<MethodDeclaration> newPUTs = retrofitSimilarTestsTogether(similarTestGroups, cu);
+//            String putsFile = createParameterizedTestFile(purifiedTestsFile, newPUTs, new ArrayList<>());
+//            createGPTEnhancedTestFile(putsFile, newPUTs);
             // ToDo: Add logic to merge separate PUTs into a single PUT
             // ToDo: Experiment on hadoop old dataset test files
             // Later: Quality check -> [runnable] [same or more coverage]
