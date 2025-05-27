@@ -80,6 +80,8 @@ java -jar Untangle2Weave.jar /path/to/TestFile.java detectin
 java -jar Untangle2Weave.jar /path/to/java/repo fixInRepo
 ```
 
+The LLM Enhancement module has been build to be run as a separate step after the refactoring step. It can be run by running the java file refactor2refresh.TestEnhancer.java and providing the path to the refactored test file as an argument.
+
 ##### Note
 The logs / code might refer to DAT smell as Assertion Pasta, since it was the old name for the same smell.
 
