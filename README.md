@@ -1,7 +1,7 @@
 # 🧪 U2W: Untangle to Weave Disjoint Assertion Tangles in Unit Tests
 
 **U2W** is a program analysis-based tool that automatically detects and refactors a novel test-code smell called **Disjoint Assertion Tangles (DAT)** — where a single test method verifies multiple logically unrelated behaviors.
-
+Note: Main file is `Untangle2Weave.java`
 ---
 
 ## What It Does
@@ -15,15 +15,15 @@
 
 ## Backed by Research
 
-U2W was evaluated on **42,335 tests across 49 open-source projects**, revealing:
+U2W was evaluated on **42,334 tests across 49 open-source projects**, revealing:
 - **DAT smell in 95.9%** of subject projects,
-- Over **3,636 smelly tests refactored**,
-- **1,709 PUTs generated**, with an average of **XX** value sets per test,
-- **36.18% average reduction** in executable test-code lines.
+- Over **3,638 smelly tests refactored**,
+- **1,713 PUTs generated**, with an average of **5.85** value sets per test,
+- **36.33% average reduction** in executable test-code lines.
 
 To validate its effectiveness:
-- A **user study with 34 software engineers** confirmed the practical utility of U2W,
-- **20 pull requests** were submitted based on the tool's refactorings, with **16 accepted** by project maintainers.
+- A **user study with 34 software engineers and 15 students** confirmed the practical utility of U2W,
+- **19 pull requests** were submitted based on the tool's refactorings, with **15 accepted** by project maintainers.
 
 These results demonstrate that U2W can significantly improve test-suite quality with minimal developer intervention.
 
@@ -67,17 +67,17 @@ For fix modes with XLSX report generation, you can specify the output location:
 To run U2W, provide the input path followed by one of the execution modes:
 
 ```bash
-# Single repository
+# Detect in Single repository
 java -jar Untangle2Weave.jar /path/to/java/repo detect
 
-# Multiple repositories (comma-separated)
+# Detect in Multiple repositories (comma-separated)
 java -jar Untangle2Weave.jar /path/to/repo1,/path/to/repo2,/path/to/repo3 allrepo
 
-# Single file detection
-java -jar Untangle2Weave.jar /path/to/TestFile.java detectin
-
-# Fix with report generation
+# Fix in single repo with report generation
 java -jar Untangle2Weave.jar /path/to/java/repo fixInRepo
+
+# Fix in multiple repo with report generation
+java -jar Untangle2Weave.jar /path/to/java/repo,/path/to/repo2 fixInAllRepoWithXLSXReport
 ```
 
 The LLM Enhancement module has been build to be run as a separate step after the refactoring step. It can be run by running the java file refactor2refresh.TestEnhancer.java and providing the path to the refactored test file as an argument.

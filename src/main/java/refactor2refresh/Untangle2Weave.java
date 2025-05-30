@@ -1796,14 +1796,54 @@ public class Untangle2Weave {
         return false;
     }
 
-    public static boolean hasComplexControlStructures(MethodDeclaration method) {
+    public static boolean hasComplexControlStructures(MethodDeclaration method, Map<String, Integer> filteredTestsMap) {
         try {
+
+            // Check for parameterized test annotations
+            if (isParameterizedTest(method)) {
+                filteredTestsMap.merge("PUT", 1, Integer::sum);
+                return true;
+            }
+
+            // Check for try-catch blocks
+            if (method.findAll(TryStmt.class).size() > 0) {
+                filteredTestsMap.merge("CTRL", 1, Integer::sum);
+                return true;
+            }
+
+            // Check for if-else statements
+            if (method.findAll(IfStmt.class).size() > 0) {
+                filteredTestsMap.merge("CTRL", 1, Integer::sum);
+                return true;
+            }
+
+            // Check for for loops
+            if (method.findAll(ForStmt.class).size() > 0 ||
+                    method.findAll(ForEachStmt.class).size() > 0) {
+                filteredTestsMap.merge("CTRL", 1, Integer::sum);
+                return true;
+            }
+
+            // Check for while loops
+            if (method.findAll(WhileStmt.class).size() > 0 ||
+                    method.findAll(DoStmt.class).size() > 0) {
+                filteredTestsMap.merge("CTRL", 1, Integer::sum);
+                return true;
+            }
+
+            // Check for lambda expressions
+            if (method.findAll(LambdaExpr.class).size() > 0) {
+                filteredTestsMap.merge("LMDA", 1, Integer::sum);
+                return true;
+            }
+
             // Check for Thread.sleep calls
             for (MethodCallExpr methodCall : method.findAll(MethodCallExpr.class)) {
                 if (methodCall.getNameAsString().equals("sleep")) {
                     // Check if it's specifically Thread.sleep
                     if (methodCall.getScope().isPresent() &&
                             methodCall.getScope().get().toString().equals("Thread")) {
+                        filteredTestsMap.merge("SLEEP", 1, Integer::sum);
                         return true;
                     }
                 }
@@ -1823,6 +1863,7 @@ public class Untangle2Weave {
                         MethodCallExpr parentCall = (MethodCallExpr) methodCall.getScope().get();
                         // If the parent or any ancestor in the chain is "when", it's a mocking statement
                         if (isWhenMethodInChain(parentCall)) {
+                            filteredTestsMap.merge("MOCK", 1, Integer::sum);
                             return true;
                         }
                     }
@@ -1840,6 +1881,7 @@ public class Untangle2Weave {
                                 MethodDeclaration innerMethod = (MethodDeclaration) member;
                                 if (innerMethod.getAnnotations().stream()
                                         .anyMatch(a -> a.getNameAsString().equals("Override"))) {
+                                    filteredTestsMap.merge("OVERRIDE", 1, Integer::sum);
                                     return true; // Found @Override in an anonymous class method
                                 }
                             }
@@ -1848,30 +1890,10 @@ public class Untangle2Weave {
                 }
             }
 
-            // Check for try-catch blocks
-            if (method.findAll(TryStmt.class).size() > 0) {
-                return true;
-            }
 
-            // Check for if-else statements
-            if (method.findAll(IfStmt.class).size() > 0) {
-                return true;
-            }
-
-            // Check for for loops
-            if (method.findAll(ForStmt.class).size() > 0 ||
-                    method.findAll(ForEachStmt.class).size() > 0) {
-                return true;
-            }
-
-            // Check for while loops
-            if (method.findAll(WhileStmt.class).size() > 0 ||
-                    method.findAll(DoStmt.class).size() > 0) {
-                return true;
-            }
-
-            // Check for lambda expressions
-            if (method.findAll(LambdaExpr.class).size() > 0) {
+            // Check for method references (::)
+            if (!method.findAll(MethodReferenceExpr.class).isEmpty()) {
+                filteredTestsMap.merge("CTRL", 1, Integer::sum);
                 return true;
             }
 
@@ -1879,6 +1901,7 @@ public class Untangle2Weave {
             if (!method.findAll(VariableDeclarationExpr.class).isEmpty()) {
                 for (VariableDeclarationExpr varDecl : method.findAll(VariableDeclarationExpr.class)) {
                     if (varDecl.getElementType().isArrayType()) {
+                        filteredTestsMap.merge("DS", 1, Integer::sum);
                         return true; // Explicit array declaration
                     }
 
@@ -1890,6 +1913,7 @@ public class Untangle2Weave {
                                 MethodCallExpr methodCall = (MethodCallExpr) init;
                                 // A simple heuristic: checking if the name contains 'getBytes' or similar
                                 if (methodCall.getNameAsString().equals("getBytes")) {
+                                    filteredTestsMap.merge("DS", 1, Integer::sum);
                                     return true;
                                 }
                             }
@@ -1900,11 +1924,13 @@ public class Untangle2Weave {
 
             // Check for array initializers in method calls
             for (ArrayInitializerExpr arrayInit : method.findAll(ArrayInitializerExpr.class)) {
+                filteredTestsMap.merge("DS", 1, Integer::sum);
                 return true; // Found array initializer expression
             }
 
             // Check for array creation expressions
             for (ArrayCreationExpr arrayCreation : method.findAll(ArrayCreationExpr.class)) {
+                filteredTestsMap.merge("DS", 1, Integer::sum);
                 return true; // Found explicit array creation like 'new URI[]'
             }
 
@@ -1914,19 +1940,10 @@ public class Untangle2Weave {
                 String type = varDecl.getElementType().asString();
                 for (String complexType : complexTypes) {
                     if (type.contains(complexType)) {
+                        filteredTestsMap.merge("DS", 1, Integer::sum);
                         return true;
                     }
                 }
-            }
-
-            // Check for parameterized test annotations
-            if (isParameterizedTest(method)) {
-                return true;
-            }
-
-            // Check for method references (::)
-            if (!method.findAll(MethodReferenceExpr.class).isEmpty()) {
-                return true;
             }
 
             return false;
@@ -1944,16 +1961,16 @@ public class Untangle2Weave {
         // List of annotations that indicate parameterized tests
         List<String> parameterizedAnnotations = Arrays.asList(
                 // JUnit 5 parameterized test annotations
-                "ParameterizedTest",
-                "ValueSource",
-                "CsvSource",
-                "MethodSource",
-                "EnumSource",
-                "ArgumentsSource",
-                "CsvFileSource",
+                "@ParameterizedTest",
+                "@ValueSource",
+                "@CsvSource",
+                "@MethodSource",
+                "@EnumSource",
+                "@ArgumentsSource",
+                "@CsvFileSource",
                 // JUnit 4 parameterized test annotations
-                "Parameters",
-                "Parameter"
+                "@Parameters",
+                "@Parameter"
         );
 
         // Check each annotation
@@ -2094,7 +2111,8 @@ public class Untangle2Weave {
         AtomicInteger totalTests = new AtomicInteger();
         AtomicInteger totalConsideredTests = new AtomicInteger();
         AtomicInteger AssertionPastaCount = new AtomicInteger();
-        AtomicInteger totalLocOfObservedTests = new AtomicInteger();;
+        AtomicInteger totalLocOfObservedTests = new AtomicInteger();
+        Map<String, Integer> filteredTestsMap = new HashMap<>();
 
         // Extract @Before method dependencies
         Map<String, Set<String>> beforeMethodDependencies = extractBeforeMethodDependencies(originalClass);
@@ -2107,15 +2125,15 @@ public class Untangle2Weave {
 //                .filter(method -> !hasComplexControlStructures(method)) // ToDo: Count number of tests excluded
                 .forEach(testMethod -> {
                     totalTests.getAndIncrement();
-                    if(hasComplexControlStructures(testMethod)) {
+                    if(hasComplexControlStructures(testMethod, filteredTestsMap)) {
                         return;
                     }
 
                     totalConsideredTests.getAndIncrement();
-                    if(hasComplexControlStructures(testMethod)) {
-
-                        return; // Skip this test method
-                    }
+//                    if(hasComplexControlStructures(testMethod)) {
+//
+//                        return; // Skip this test method
+//                    }
 
                     totalLocOfObservedTests.addAndGet(extractTestLogicLineCount(inputCompilationUnit, testMethod.getNameAsString()));
 
@@ -2197,6 +2215,7 @@ public class Untangle2Weave {
         result.pastaCount = AssertionPastaCount.get();
         result.pastaPercentage = totalConsideredTests.get() > 0 ? (AssertionPastaCount.get() * 100.0 / totalConsideredTests.get()) : 0.0;
         result.totalLocInObservedTests = totalLocOfObservedTests.get();
+        result.filteredTestsMap = filteredTestsMap;
 
 //        TestFileResult result = new TestFileResult(inputFilePath, totalConsideredTests.get(), AssertionPastaCount.get(),
 //                totalConsideredTests.get() > 0 ? (AssertionPastaCount.get() * 100.0 / totalConsideredTests.get()) : 0.0);
@@ -3013,6 +3032,11 @@ public class Untangle2Weave {
         aggregated.totalConsideredTests += result.totalConsideredTests;
         aggregated.pastaCount += result.pastaCount;
         aggregated.totalLocInObservedTests += result.totalLocInObservedTests;
+        // Merge the maps
+        for (Map.Entry<String, Integer> entry : result.filteredTestsMap.entrySet()) {
+            aggregated.filteredTestsMap.merge(entry.getKey(), entry.getValue(), Integer::sum);
+        }
+
         return aggregated;
     }
 
@@ -3501,6 +3525,14 @@ public class Untangle2Weave {
         dataRow.createCell(9).setCellValue(result.aggregatedResult.totalTests); // Total tests in repo
         dataRow.createCell(10).setCellValue(result.aggregatedResult.totalLocInObservedTests); // Total tests in repo
 
+        // Sort the map by key
+        Map<String, Integer> sortedMap = new TreeMap<>(result.aggregatedResult.filteredTestsMap);
+
+        // Write values in columns 11 onwards (index = 11)
+        int colIdx = 11;
+        for (Map.Entry<String, Integer> entry : sortedMap.entrySet()) {
+            dataRow.createCell(colIdx++).setCellValue(entry.getValue());
+        }
         // Auto-size columns
         for (int i = 0; i < 8; i++) {
             reportSheet.autoSizeColumn(i);
@@ -3647,6 +3679,14 @@ public class Untangle2Weave {
             addSummaryRow(sheet, rowIdx++, "Average Value sets per PUT", averageValueSetsPerPUT);
             addSummaryRow(sheet, rowIdx++, "Total Test in repo", result.aggregatedResult.totalTests);
             addSummaryRow(sheet, rowIdx++, "Total Loc in observed Tests", result.aggregatedResult.totalLocInObservedTests);
+//            addSummaryRow(sheet, rowIdx++, "---- Filtering Breakdown by Key ----", "");
+//
+//            // Sort and write map entries
+//            Map<String, Integer> sortedMap = new TreeMap<>(result.aggregatedResult.filteredTestsMap); // TreeMap sorts by key
+//
+//            for (Map.Entry<String, Integer> entry : sortedMap.entrySet()) {
+//                addSummaryRow(sheet, rowIdx++, entry.getKey(), entry.getValue());
+//            }
 
             updateReportSheet(workbook, sheetName, result, entriesCount, averageValueSetsPerPUT);
 

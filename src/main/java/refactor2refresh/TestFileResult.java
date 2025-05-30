@@ -14,6 +14,7 @@ public class TestFileResult {
     public Map<String, Integer> independentLogicsInTest; // # Separable components of test methods
     List<String> listPastaTests; // # List of test methods which has pasta
     int totalLocInObservedTests;
+    Map<String, Integer> filteredTestsMap;
 
     public TestFileResult(){
         this.filePath = "";
@@ -24,6 +25,16 @@ public class TestFileResult {
         this.independentLogicsInTest = new HashMap<>();
         this.listPastaTests = new ArrayList<String>();
         this.totalLocInObservedTests = 0;
+        this.filteredTestsMap = new HashMap<>() {{
+            put("CTRL", 0);
+            put("DS", 0);
+            put("LMDA", 0);
+            put("PUT", 0);
+            put("SLEEP", 0);
+            put("MOCK", 0);
+            put("OVERRIDE", 0);
+
+        }};
     }
 
     TestFileResult(String filePath, int totalTests, int totalConsideredTests, int pastaCount, double pastaPercentage) {
@@ -34,5 +45,7 @@ public class TestFileResult {
         this.pastaPercentage = pastaPercentage;
         this.independentLogicsInTest = new HashMap<>();
         this.listPastaTests = new ArrayList<String>();
+        this.totalLocInObservedTests = 0;
+        this.filteredTestsMap = new HashMap<>();
     }
 }
